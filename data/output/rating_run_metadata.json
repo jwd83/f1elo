@@ -1,0 +1,26 @@
+{
+  "generated_at": "2026-06-04T03:33:02.035641+00:00",
+  "input_dir": "data/raw/f1db-v2026.5.1",
+  "outputs": {
+    "driver_season_ratings": "driver_season_ratings.csv",
+    "driver_season_top": "driver_season_top.csv",
+    "driver_season_top_qualified": "driver_season_top_qualified.csv",
+    "driver_season_last_3_completed": "driver_season_last_3_completed.csv"
+  },
+  "formula": {
+    "description": "score = base_rating - finish_weight * avg(H(finish_position - 1)) - qualifying_weight * avg(H(qualifying_position - 1))",
+    "base_rating": 3000.0,
+    "finish_weight": 225.0,
+    "qualifying_weight": 75.0,
+    "qualifying_source": "qualifying",
+    "harmonic_definition": "H(0)=0; H(n)=sum(1/i for i in 1..n)"
+  },
+  "qualified_top_filter": {
+    "min_race_share": 0.75,
+    "min_entries": 4
+  },
+  "recent_completed_seasons": 3,
+  "row_count": 3265,
+  "first_year": 1950,
+  "last_year": 2026
+}
