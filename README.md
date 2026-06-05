@@ -51,6 +51,35 @@ Main outputs:
 - `driver_season_last_3_completed.csv`: all driver-season rows from the latest
   three completed seasons in the saved data.
 - `rating_run_metadata.json`: parameters and run metadata for the generated files.
+- `f1elo.sqlite`: bundled SQLite database for the site explorer.
+
+The site-served copy of the SQLite database is written to:
+
+```text
+site/public/f1elo.sqlite
+```
+
+## Site Explorer
+
+The `site/` directory contains a Vite/React frontend that loads the bundled
+SQLite database with `sql.js`. It opens on a driver-season dominance leaderboard,
+with visible controls for the current scoring model:
+
+- `base_rating`
+- `finish_weight`
+- `qualifying_weight`
+- `qualifying_source`
+
+The default leaderboard filters are:
+
+```text
+race_share >= 0.75
+entries >= 4
+completed seasons only
+```
+
+Rows can be searched, re-ranked live in the browser, and opened for a compact
+race-by-race drilldown.
 
 ## Rerun
 
@@ -58,6 +87,31 @@ Run with defaults:
 
 ```bash
 python3 scripts/build_ratings.py
+```
+
+Build the site SQLite database and keep the frontend copy current:
+
+```bash
+python3 scripts/build_site_db.py
+```
+
+That command regenerates the default rating CSVs, mirrors all raw F1DB CSV tables
+into SQLite, imports the rating outputs, creates app-ready views and indexes, and
+copies the finished database to `site/public/f1elo.sqlite`.
+
+Run the site locally:
+
+```bash
+cd site
+npm install
+npm run dev -- --host 127.0.0.1
+```
+
+Build the site:
+
+```bash
+cd site
+npm run build
 ```
 
 Tune the formula:

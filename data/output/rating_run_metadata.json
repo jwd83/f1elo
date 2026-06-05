@@ -1,6 +1,6 @@
 {
-  "generated_at": "2026-06-04T03:33:02.035641+00:00",
-  "input_dir": "data/raw/f1db-v2026.5.1",
+  "generated_at": "2026-06-05T06:27:30.391912+00:00",
+  "input_dir": "/Users/jared/Documents/f1elo/data/raw/f1db-v2026.5.1",
   "outputs": {
     "driver_season_ratings": "driver_season_ratings.csv",
     "driver_season_top": "driver_season_top.csv",
