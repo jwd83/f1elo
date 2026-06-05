@@ -114,6 +114,34 @@ cd site
 npm run build
 ```
 
+## GitHub Pages Deploy
+
+This repo is set up to publish the Vite build from `site/dist` with GitHub
+Actions. The workflow rebuilds the default rating CSVs, rebuilds
+`site/public/f1elo.sqlite`, runs the Vite build, and deploys the static artifact.
+
+On GitHub:
+
+1. Open `jwd83/f1elo` > Settings > Pages.
+2. Under Build and deployment, set Source to `GitHub Actions`.
+3. Under Custom domain, enter `driverscore.jwd.me` and save it.
+4. When GitHub reports the domain is ready, enable Enforce HTTPS.
+
+In Cloudflare DNS for `jwd.me`, create this record:
+
+```text
+Type: CNAME
+Name: driverscore
+Target: jwd83.github.io
+Proxy status: DNS only
+TTL: Auto
+```
+
+Keep the CNAME pointed directly at `jwd83.github.io`, without the repository
+name. GitHub also recommends verifying `jwd.me` in your GitHub account Pages
+settings to reduce custom-domain takeover risk; GitHub will show the exact TXT
+record to add in Cloudflare.
+
 Tune the formula:
 
 ```bash
