@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import {
   Activity,
   Database,
@@ -16,10 +16,12 @@ const DEFAULT_MODEL = {
   finishWeight: 225,
   qualifyingWeight: 75,
   qualifyingSource: "qualifying",
+  multiSeasonPeak: 1,
   includeIncomplete: false,
   minRaceShare: 0.75,
   minEntries: 4,
 };
+const MULTI_SEASON_PEAK_MAX = 23;
 
 function parseMetadata(rows) {
   return Object.fromEntries(
@@ -47,6 +49,11 @@ function formatPercent(value) {
   return `${Math.round(Number(value) * 100)}%`;
 }
 
+function toNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : 0;
+}
+
 function titleize(value) {
   return String(value)
     .split("-")
@@ -57,13 +64,13 @@ function titleize(value) {
 function modelScore(row, model) {
   const qualifyingLoss =
     model.qualifyingSource === "grid"
-      ? Number(row.avg_grid_harmonic_loss)
-      : Number(row.avg_qualifying_harmonic_loss);
+      ? toNumber(row.avg_grid_harmonic_loss)
+      : toNumber(row.avg_qualifying_harmonic_loss);
 
   return (
-    Number(model.baseRating) -
-    Number(model.finishWeight) * Number(row.avg_finish_harmonic_loss) -
-    Number(model.qualifyingWeight) * qualifyingLoss
+    toNumber(model.baseRating) -
+    toNumber(model.finishWeight) * toNumber(row.avg_finish_harmonic_loss) -
+    toNumber(model.qualifyingWeight) * qualifyingLoss
   );
 }
 
@@ -81,6 +88,161 @@ function constructorNames(value, constructors) {
     .join(" / ");
 }
 
+function constructorIds(value) {
+  if (!value) {
+    return [];
+  }
+  return String(value).split("/").filter(Boolean);
+}
+
+function uniqueChronologicalConstructorIds(rows) {
+  const seen = new Set();
+  const ids = [];
+
+  rows.forEach((row) => {
+    constructorIds(row.constructors).forEach((id) => {
+      if (!seen.has(id)) {
+        seen.add(id);
+        ids.push(id);
+      }
+    });
+  });
+
+  return ids;
+}
+
+function average(rows, fieldName) {
+  if (!rows.length) {
+    return 0;
+  }
+  return (
+    rows.reduce((total, row) => total + toNumber(row[fieldName]), 0) /
+    rows.length
+  );
+}
+
+function sum(rows, fieldName) {
+  return rows.reduce((total, row) => total + toNumber(row[fieldName]), 0);
+}
+
+function activePoleCount(row, model) {
+  return model.qualifyingSource === "grid"
+    ? toNumber(row.grid_poles)
+    : toNumber(row.poles);
+}
+
+function compareSeasonRows(a, b) {
+  if (b.computed_score !== a.computed_score) {
+    return b.computed_score - a.computed_score;
+  }
+  if (a.year !== b.year) {
+    return toNumber(a.year) - toNumber(b.year);
+  }
+  return String(a.driver_name).localeCompare(String(b.driver_name));
+}
+
+function comparePeakRows(a, b) {
+  if (b.computed_score !== a.computed_score) {
+    return b.computed_score - a.computed_score;
+  }
+  if (b.best_season_score !== a.best_season_score) {
+    return b.best_season_score - a.best_season_score;
+  }
+  if (a.earliest_year !== b.earliest_year) {
+    return a.earliest_year - b.earliest_year;
+  }
+  return String(a.driver_name).localeCompare(String(b.driver_name));
+}
+
+function buildPeakRows(rows, model, constructors, peakSize) {
+  const byDriver = new Map();
+
+  rows.forEach((row) => {
+    if (!byDriver.has(row.driver_id)) {
+      byDriver.set(row.driver_id, []);
+    }
+    byDriver.get(row.driver_id).push(row);
+  });
+
+  return Array.from(byDriver.values())
+    .filter((driverRows) => driverRows.length >= peakSize)
+    .map((driverRows) => {
+      const selectedByScore = [...driverRows]
+        .sort(compareSeasonRows)
+        .slice(0, peakSize);
+      const selectedChronological = [...selectedByScore].sort(
+        (a, b) => toNumber(a.year) - toNumber(b.year),
+      );
+      const selectedYears = selectedChronological.map((row) => toNumber(row.year));
+      const constructorIdList = uniqueChronologicalConstructorIds(selectedChronological);
+      const entries = sum(selectedChronological, "entries");
+      const scheduledRaces = sum(selectedChronological, "scheduled_races");
+      const completedRaces = sum(selectedChronological, "completed_races");
+      const avgFinishLoss = average(selectedChronological, "avg_finish_harmonic_loss");
+      const avgQualifyingLoss = average(
+        selectedChronological,
+        "avg_qualifying_harmonic_loss",
+      );
+      const avgGridLoss = average(selectedChronological, "avg_grid_harmonic_loss");
+      const activePoles = selectedChronological.reduce(
+        (total, row) => total + activePoleCount(row, model),
+        0,
+      );
+
+      return {
+        driver_id: selectedChronological[0].driver_id,
+        driver_name: selectedChronological[0].driver_name,
+        key: `peak:${peakSize}:${selectedChronological[0].driver_id}`,
+        year: `(${selectedYears.join(", ")})`,
+        season_label: `(${selectedYears.join(", ")})`,
+        selected_years: selectedYears,
+        season_rows: selectedChronological,
+        is_peak: true,
+        constructors: constructorIdList.join("/"),
+        constructor_names: constructorNames(constructorIdList.join("/"), constructors),
+        computed_score: average(selectedChronological, "computed_score"),
+        best_season_score: selectedByScore[0].computed_score,
+        earliest_year: selectedYears[0],
+        scheduled_races: scheduledRaces,
+        completed_races: completedRaces,
+        entries,
+        race_share: scheduledRaces > 0 ? entries / scheduledRaces : 0,
+        wins: sum(selectedChronological, "wins"),
+        podiums: sum(selectedChronological, "podiums"),
+        poles: sum(selectedChronological, "poles"),
+        grid_poles: sum(selectedChronological, "grid_poles"),
+        active_poles: activePoles,
+        points: sum(selectedChronological, "points"),
+        avg_finish_harmonic_loss: avgFinishLoss,
+        avg_qualifying_harmonic_loss: avgQualifyingLoss,
+        avg_grid_harmonic_loss: avgGridLoss,
+        is_completed_season: selectedChronological.every(
+          (row) => row.is_completed_season === 1,
+        )
+          ? 1
+          : 0,
+      };
+    });
+}
+
+function rowMatchesSearch(row, normalizedSearch) {
+  if (!normalizedSearch) {
+    return true;
+  }
+
+  return [
+    row.driver_name,
+    row.year,
+    row.season_label,
+    row.constructors,
+    row.constructor_names,
+    ...(row.selected_years || []),
+  ]
+    .join(" ")
+    .toLowerCase()
+    .includes(normalizedSearch);
+}
+
 function App() {
   const [db, setDb] = useState(null);
   const [status, setStatus] = useState("Loading SQLite data");
@@ -91,6 +253,7 @@ function App() {
   const [model, setModel] = useState(DEFAULT_MODEL);
   const [search, setSearch] = useState("");
   const [selectedKey, setSelectedKey] = useState("");
+  const [selectedDriverId, setSelectedDriverId] = useState("");
   const [raceRows, setRaceRows] = useState([]);
 
   useEffect(() => {
@@ -136,53 +299,53 @@ function App() {
     };
   }, []);
 
+  const peakSize = Math.max(
+    1,
+    Math.min(MULTI_SEASON_PEAK_MAX, toNumber(model.multiSeasonPeak)),
+  );
+  const isMultiSeason = peakSize >= 2;
+
   const scoredRows = useMemo(() => {
     const normalizedSearch = search.trim().toLowerCase();
-    const rows = seasonRows
+    const eligibleSeasonRows = seasonRows
       .map((row) => ({
         ...row,
         key: rowKey(row),
+        season_label: String(row.year),
+        selected_years: [toNumber(row.year)],
+        season_rows: [row],
+        is_peak: false,
         computed_score: modelScore(row, model),
         constructor_names: constructorNames(row.constructors, constructors),
+        active_poles: activePoleCount(row, model),
       }))
       .filter((row) => model.includeIncomplete || row.is_completed_season === 1)
-      .filter((row) => Number(row.race_share) >= Number(model.minRaceShare))
-      .filter((row) => Number(row.entries) >= Number(model.minEntries))
-      .filter((row) => {
-        if (!normalizedSearch) {
-          return true;
-        }
+      .filter((row) => toNumber(row.race_share) >= toNumber(model.minRaceShare))
+      .filter((row) => toNumber(row.entries) >= toNumber(model.minEntries))
+      .filter((row) => toNumber(row.entries) > 0);
 
-        return [
-          row.driver_name,
-          row.year,
-          row.constructors,
-          row.constructor_names,
-        ]
-          .join(" ")
-          .toLowerCase()
-          .includes(normalizedSearch);
-      })
-      .sort((a, b) => {
-        if (b.computed_score !== a.computed_score) {
-          return b.computed_score - a.computed_score;
-        }
-        if (a.year !== b.year) {
-          return a.year - b.year;
-        }
-        return String(a.driver_name).localeCompare(String(b.driver_name));
-      });
+    const rows = isMultiSeason
+      ? buildPeakRows(eligibleSeasonRows, model, constructors, peakSize)
+          .filter((row) => rowMatchesSearch(row, normalizedSearch))
+          .sort(comparePeakRows)
+      : eligibleSeasonRows
+          .filter((row) => rowMatchesSearch(row, normalizedSearch))
+          .sort(compareSeasonRows);
 
     return rows.map((row, index) => ({ ...row, computed_rank: index + 1 }));
-  }, [constructors, model, search, seasonRows]);
+  }, [constructors, isMultiSeason, model, peakSize, search, seasonRows]);
 
   const tableRows = scoredRows.slice(0, 250);
   const selectedRow = useMemo(() => {
     if (!scoredRows.length) {
       return null;
     }
-    return scoredRows.find((row) => row.key === selectedKey) || scoredRows[0];
-  }, [scoredRows, selectedKey]);
+    return (
+      scoredRows.find((row) => row.key === selectedKey) ||
+      scoredRows.find((row) => row.driver_id === selectedDriverId) ||
+      scoredRows[0]
+    );
+  }, [scoredRows, selectedDriverId, selectedKey]);
 
   useEffect(() => {
     if (!scoredRows.length) {
@@ -190,10 +353,18 @@ function App() {
       return;
     }
 
-    if (!selectedKey || !scoredRows.some((row) => row.key === selectedKey)) {
-      setSelectedKey(scoredRows[0].key);
+    const nextRow =
+      scoredRows.find((row) => row.key === selectedKey) ||
+      scoredRows.find((row) => row.driver_id === selectedDriverId) ||
+      scoredRows[0];
+
+    if (nextRow.key !== selectedKey) {
+      setSelectedKey(nextRow.key);
     }
-  }, [scoredRows, selectedKey]);
+    if (nextRow.driver_id !== selectedDriverId) {
+      setSelectedDriverId(nextRow.driver_id);
+    }
+  }, [scoredRows, selectedDriverId, selectedKey]);
 
   useEffect(() => {
     if (!db || !selectedRow) {
@@ -201,24 +372,31 @@ function App() {
       return;
     }
 
+    const selectedYears = selectedRow.selected_years || [selectedRow.year];
+    const placeholders = selectedYears.map(() => "?").join(", ");
     const rows = queryRows(
       db,
       `
         SELECT *
         FROM driver_season_race_results
-        WHERE year = ? AND driver_id = ?
-        ORDER BY round
+        WHERE driver_id = ? AND year IN (${placeholders})
+        ORDER BY year, round
       `,
-      [selectedRow.year, selectedRow.driver_id],
+      [selectedRow.driver_id, ...selectedYears],
     );
     setRaceRows(rows);
-  }, [db, selectedRow?.driver_id, selectedRow?.year]);
+  }, [db, selectedRow?.driver_id, selectedRow?.key]);
 
   const leader = scoredRows[0];
   const displayedGeneratedAt =
     typeof metadata.generated_at === "string"
       ? new Date(metadata.generated_at).toLocaleString()
       : "-";
+
+  function selectRow(row) {
+    setSelectedKey(row.key);
+    setSelectedDriverId(row.driver_id);
+  }
 
   return (
     <main className="app-shell">
@@ -262,7 +440,7 @@ function App() {
               <div className="panel-toolbar">
                 <div>
                   <p className="eyebrow">Leaderboard</p>
-                  <h2>Peak Seasons</h2>
+                  <h2>{isMultiSeason ? "Peak Drivers" : "Peak Seasons"}</h2>
                 </div>
                 <div className="search-box">
                   <Search size={16} aria-hidden="true" />
@@ -289,11 +467,15 @@ function App() {
               <LeaderboardTable
                 rows={tableRows}
                 selectedKey={selectedRow?.key}
-                onSelect={setSelectedKey}
+                isMultiSeason={isMultiSeason}
+                onSelect={selectRow}
               />
 
               <div className="table-footer">
-                <span>{formatNumber(scoredRows.length)} eligible seasons</span>
+                <span>
+                  {formatNumber(scoredRows.length)} eligible{" "}
+                  {isMultiSeason ? "drivers" : "seasons"}
+                </span>
                 <span>showing {formatNumber(tableRows.length)}</span>
               </div>
             </div>
@@ -357,6 +539,17 @@ function ModelControls({ model, onChange }) {
         step={5}
         onChange={(value) => update("qualifyingWeight", value)}
       />
+      <Slider
+        label="Multi-season peak"
+        value={model.multiSeasonPeak}
+        displayValue={
+          model.multiSeasonPeak === 1 ? "Off" : `${model.multiSeasonPeak} seasons`
+        }
+        min={1}
+        max={MULTI_SEASON_PEAK_MAX}
+        step={1}
+        onChange={(value) => update("multiSeasonPeak", value)}
+      />
 
       <div className="segmented-control" aria-label="Qualifying source">
         <button
@@ -413,19 +606,21 @@ function ModelControls({ model, onChange }) {
   );
 }
 
-function Slider({ label, value, min, max, step, onChange }) {
+function Slider({ label, value, displayValue, min, max, step, onChange }) {
   return (
     <label className="slider-row">
       <span>
         {label}
-        <strong>{formatNumber(value)}</strong>
+        <strong>{displayValue || formatNumber(value)}</strong>
       </span>
       <input
+        aria-label={label}
         type="range"
         min={min}
         max={max}
         step={step}
         value={value}
+        onInput={(event) => onChange(Number(event.target.value))}
         onChange={(event) => onChange(Number(event.target.value))}
       />
     </label>
@@ -445,7 +640,9 @@ function TimingSnapshot({ leader, rows, seasonRows }) {
       </div>
       <div className="metric">
         <span>P1</span>
-        <strong>{leader ? `${leader.driver_name} ${leader.year}` : "-"}</strong>
+        <strong>
+          {leader ? `${leader.driver_name} ${leader.season_label}` : "-"}
+        </strong>
       </div>
       <div className="metric accent">
         <span>Score</span>
@@ -478,7 +675,7 @@ function TopChart({ rows }) {
               <div className="bar-track">
                 <div className="bar-fill" style={{ width: `${width}%` }} />
                 <strong>
-                  {row.driver_name} {row.year}
+                  {row.driver_name} {row.season_label}
                 </strong>
               </div>
               <span>{formatNumber(row.computed_score, 0)}</span>
@@ -490,14 +687,14 @@ function TopChart({ rows }) {
   );
 }
 
-function LeaderboardTable({ rows, selectedKey, onSelect }) {
+function LeaderboardTable({ rows, selectedKey, isMultiSeason, onSelect }) {
   return (
     <div className="table-wrap">
       <table className="leaderboard-table">
         <thead>
           <tr>
             <th>Rank</th>
-            <th>Season</th>
+            <th>{isMultiSeason ? "Seasons" : "Season"}</th>
             <th>Driver</th>
             <th>Constructor</th>
             <th>Score</th>
@@ -512,15 +709,15 @@ function LeaderboardTable({ rows, selectedKey, onSelect }) {
             <tr
               className={row.key === selectedKey ? "selected" : ""}
               key={row.key}
-              onClick={() => onSelect(row.key)}
+              onClick={() => onSelect(row)}
             >
               <td className="rank-cell">{row.computed_rank}</td>
-              <td>{row.year}</td>
+              <td className="season-cell">{row.season_label}</td>
               <td>
                 <button
                   className="driver-pick"
                   type="button"
-                  onClick={() => onSelect(row.key)}
+                  onClick={() => onSelect(row)}
                 >
                   {row.driver_name}
                 </button>
@@ -532,7 +729,7 @@ function LeaderboardTable({ rows, selectedKey, onSelect }) {
               </td>
               <td>{row.wins}</td>
               <td>{row.podiums}</td>
-              <td>{row.poles}</td>
+              <td>{row.active_poles}</td>
             </tr>
           ))}
         </tbody>
@@ -546,7 +743,7 @@ function SeasonDetail({ row, raceRows, model }) {
     return (
       <aside className="detail-panel">
         <p className="eyebrow">Season trace</p>
-        <h2>No matching season</h2>
+        <h2>No matching seasons</h2>
       </aside>
     );
   }
@@ -558,14 +755,15 @@ function SeasonDetail({ row, raceRows, model }) {
       ? Number(row.avg_grid_harmonic_loss)
       : Number(row.avg_qualifying_harmonic_loss);
   const qualifyingPenalty = Number(model.qualifyingWeight) * qualifyingLoss;
+  const traceLabel = row.is_peak ? "Peak trace" : "Season trace";
 
   return (
     <aside className="detail-panel">
       <div className="detail-hero">
         <div>
-          <p className="eyebrow">Season trace</p>
+          <p className="eyebrow">{traceLabel}</p>
           <h2>
-            {row.driver_name} <span>{row.year}</span>
+            {row.driver_name} <span>{row.season_label}</span>
           </h2>
           <p>{row.constructor_names}</p>
         </div>
@@ -595,24 +793,35 @@ function SeasonDetail({ row, raceRows, model }) {
       </div>
 
       <div className="race-list">
-        {raceRows.map((race) => (
-          <div className="race-row" key={race.race_id}>
-            <div className="race-round">
-              <Flag size={14} aria-hidden="true" />
-              <span>{race.round}</span>
-            </div>
-            <div className="race-main">
-              <strong>{race.grand_prix_name}</strong>
-              <span>{race.circuit_name || race.official_name}</span>
-            </div>
-            <div className="race-result">
-              <span>P{race.position_text || race.position_display_order}</span>
-              <span>Q{race.qualification_position_text || "-"}</span>
-              <span>G{race.grid_position_text || "-"}</span>
-              <strong>{formatNumber(race.points, 1)}</strong>
-            </div>
-          </div>
-        ))}
+        {raceRows.map((race, index) => {
+          const previousRace = raceRows[index - 1];
+          const showYearDivider =
+            row.is_peak && (!previousRace || previousRace.year !== race.year);
+
+          return (
+            <Fragment key={`${race.year}:${race.race_id}`}>
+              {showYearDivider ? (
+                <div className="race-year-divider">{race.year}</div>
+              ) : null}
+              <div className="race-row">
+                <div className="race-round">
+                  <Flag size={14} aria-hidden="true" />
+                  <span>{race.round}</span>
+                </div>
+                <div className="race-main">
+                  <strong>{race.grand_prix_name}</strong>
+                  <span>{race.circuit_name || race.official_name}</span>
+                </div>
+                <div className="race-result">
+                  <span>P{race.position_text || race.position_display_order}</span>
+                  <span>Q{race.qualification_position_text || "-"}</span>
+                  <span>G{race.grid_position_text || "-"}</span>
+                  <strong>{formatNumber(race.points, 1)}</strong>
+                </div>
+              </div>
+            </Fragment>
+          );
+        })}
       </div>
     </aside>
   );

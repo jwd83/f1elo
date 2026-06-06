@@ -496,7 +496,8 @@ input[type="range"] {
 }
 
 .rank-cell,
-.score-cell {
+.score-cell,
+.season-cell {
   color: var(--yellow);
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   font-weight: 800;
@@ -537,8 +538,13 @@ input[type="range"] {
   padding-bottom: 14px;
 }
 
+.detail-hero > div:first-child {
+  min-width: 0;
+}
+
 .detail-hero h2 {
   font-size: 1.35rem;
+  overflow-wrap: anywhere;
 }
 
 .detail-hero h2 span {
@@ -549,6 +555,7 @@ input[type="range"] {
 .detail-hero p:last-child {
   margin: 6px 0 0;
   color: var(--muted);
+  overflow-wrap: anywhere;
 }
 
 .score-badge {
@@ -592,6 +599,15 @@ input[type="range"] {
   overflow: auto;
   gap: 8px;
   padding-right: 3px;
+}
+
+.race-year-divider {
+  border-top: 1px solid var(--line);
+  padding: 10px 2px 0;
+  color: var(--yellow);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.76rem;
+  font-weight: 800;
 }
 
 .race-row {
