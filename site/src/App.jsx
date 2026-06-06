@@ -14,7 +14,7 @@ import { loadDatabase, queryRows } from "./db.js";
 const DEFAULT_MODEL = {
   baseRating: 3000,
   finishWeight: 225,
-  qualifyingWeight: 75,
+  qualifyingWeight: 0,
   qualifyingSource: "qualifying",
   multiSeasonPeak: 1,
   includeIncomplete: false,
@@ -535,7 +535,7 @@ function ModelControls({ model, onChange }) {
         label="Qualifying weight"
         value={model.qualifyingWeight}
         min={0}
-        max={200}
+        max={400}
         step={5}
         onChange={(value) => update("qualifyingWeight", value)}
       />
