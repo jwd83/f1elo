@@ -13,6 +13,7 @@ import { loadDatabase, queryRows } from "./db.js";
 import {
   constructorIdentities,
   constructorIds,
+  constructorLogoSrc,
   getConstructorIdentity,
   primaryConstructorId,
   teamAccentStyle,
@@ -731,6 +732,20 @@ function Slider({ label, value, displayValue, min, max, step, onChange }) {
   );
 }
 
+function TeamLogo({ identity }) {
+  return (
+    <img
+      className={`team-logo ${
+        identity.logoFile ? "team-logo-real" : "team-logo-generated"
+      }`}
+      src={constructorLogoSrc(identity)}
+      alt=""
+      aria-hidden="true"
+      draggable="false"
+    />
+  );
+}
+
 function TeamMark({ identity }) {
   return (
     <span
@@ -739,7 +754,7 @@ function TeamMark({ identity }) {
       title={identity.name}
       aria-hidden="true"
     >
-      {identity.code}
+      <TeamLogo identity={identity} />
     </span>
   );
 }
@@ -752,7 +767,7 @@ function TeamBadge({ identity, showName = true }) {
       title={identity.name}
       aria-label={`${identity.code} ${identity.name}`}
     >
-      <span className="team-code">{identity.code}</span>
+      <TeamLogo identity={identity} />
       {showName ? <span className="team-name">{identity.name}</span> : null}
     </span>
   );
@@ -794,7 +809,7 @@ function TeamBadgeList({
   );
 }
 
-function EntityPick({ row, constructors, onSelect }) {
+function EntityPick({ row, constructors, showMark, onSelect }) {
   const identity = getConstructorIdentity(primaryConstructorId(row), constructors);
 
   return (
@@ -803,7 +818,7 @@ function EntityPick({ row, constructors, onSelect }) {
       type="button"
       onClick={() => onSelect(row)}
     >
-      <TeamMark identity={identity} />
+      {showMark ? <TeamMark identity={identity} /> : null}
       <span className="entity-name-text">{row.entity_name}</span>
     </button>
   );
@@ -926,6 +941,7 @@ function LeaderboardTable({
                 <EntityPick
                   row={row}
                   constructors={constructors}
+                  showMark={isConstructorMode}
                   onSelect={onSelect}
                 />
               </td>

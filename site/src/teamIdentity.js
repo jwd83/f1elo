@@ -10,6 +10,7 @@ const TEAM_OVERRIDES = {
   audi: { color: "#ff0000", code: "AUD" },
   bar: { color: "#e10600", code: "BAR" },
   benetton: { color: "#00a859", code: "BEN" },
+  bmw: { color: "#0066b1", code: "BMW" },
   "bmw-sauber": { color: "#0066b1", code: "BMW" },
   brabham: { color: "#00a6de", code: "BRA" },
   brm: { color: "#0b5d3a", code: "BRM" },
@@ -79,6 +80,31 @@ const TEAM_OVERRIDES = {
   zakspeed: { color: "#e10600", code: "ZAK" },
 };
 
+const LOGO_FILES = {
+  "alfa-romeo": "alfa-romeo.svg",
+  alpine: "alpine.svg",
+  "aston-martin": "aston-martin.svg",
+  audi: "audi.svg",
+  bmw: "bmw.svg",
+  "bmw-sauber": "bmw-sauber.svg",
+  cadillac: "cadillac.svg",
+  ferrari: "ferrari.svg",
+  haas: "haas.svg",
+  honda: "honda.svg",
+  jaguar: "jaguar.svg",
+  "kick-sauber": "kick-sauber.svg",
+  maserati: "maserati.svg",
+  mclaren: "mclaren.svg",
+  mercedes: "mercedes.svg",
+  porsche: "porsche.svg",
+  "racing-point": "racing-point.svg",
+  "red-bull": "red-bull.svg",
+  renault: "renault.svg",
+  sauber: "sauber.svg",
+  toyota: "toyota.svg",
+  williams: "williams.svg",
+};
+
 const FALLBACK_COLORS = [
   "#ef4444",
   "#f97316",
@@ -113,6 +139,16 @@ function fallbackColor(id) {
   return FALLBACK_COLORS[hashString(id) % FALLBACK_COLORS.length];
 }
 
+function clampChannel(value) {
+  return Math.max(0, Math.min(255, Math.round(value)));
+}
+
+function rgbToHex({ r, g, b }) {
+  return `#${[r, g, b]
+    .map((channel) => clampChannel(channel).toString(16).padStart(2, "0"))
+    .join("")}`;
+}
+
 function hexToRgb(hex) {
   const normalized = String(hex).replace("#", "");
   if (!/^[0-9a-f]{6}$/i.test(normalized)) {
@@ -124,6 +160,17 @@ function hexToRgb(hex) {
     g: Number.parseInt(normalized.slice(2, 4), 16),
     b: Number.parseInt(normalized.slice(4, 6), 16),
   };
+}
+
+function mixHex(baseHex, targetHex, amount) {
+  const base = hexToRgb(baseHex);
+  const target = hexToRgb(targetHex);
+
+  return rgbToHex({
+    r: base.r + (target.r - base.r) * amount,
+    g: base.g + (target.g - base.g) * amount,
+    b: base.b + (target.b - base.b) * amount,
+  });
 }
 
 function readableTextColor(hex) {
@@ -186,6 +233,8 @@ export function getConstructorIdentity(id, constructors = new Map()) {
     name,
     color,
     code: override.code || generatedCode(normalizedId, name),
+    logoFile: LOGO_FILES[normalizedId],
+    motif: hashString(normalizedId || name) % 6,
     textColor: override.textColor || readableTextColor(color),
   };
 }
@@ -210,4 +259,88 @@ export function teamAccentStyle(row, constructors = new Map()) {
   return teamIdentityStyle(
     getConstructorIdentity(primaryConstructorId(row), constructors),
   );
+}
+
+const LOGO_CACHE = new Map();
+
+function escapeSvgText(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+}
+
+function motifPath(motif) {
+  switch (motif) {
+    case 0:
+      return '<path d="M-6 35 L20 -6 H36 L10 46 Z" fill="currentColor" opacity=".28"/>';
+    case 1:
+      return '<path d="M4 4 H30 L20 18 H50 L36 36 H4 Z" fill="currentColor" opacity=".24"/>';
+    case 2:
+      return '<path d="M0 25 C13 12 24 12 36 25 S55 38 66 20 V44 H0 Z" fill="currentColor" opacity=".22"/>';
+    case 3:
+      return '<path d="M44 -4 H66 V44 H28 Z" fill="currentColor" opacity=".25"/><path d="M28 -4 H37 L21 44 H12 Z" fill="currentColor" opacity=".18"/>';
+    case 4:
+      return '<path d="M0 0 H18 L44 40 H26 Z" fill="currentColor" opacity=".23"/><path d="M44 0 H64 V40 H58 Z" fill="currentColor" opacity=".18"/>';
+    default:
+      return '<path d="M-4 10 H68 V18 H-4 Z" fill="currentColor" opacity=".17"/><path d="M-4 27 H68 V35 H-4 Z" fill="currentColor" opacity=".24"/>';
+  }
+}
+
+export function constructorLogoDataUri(identity) {
+  const cacheKey = [
+    identity.id,
+    identity.code,
+    identity.color,
+    identity.textColor,
+    identity.motif,
+  ].join("|");
+
+  if (LOGO_CACHE.has(cacheKey)) {
+    return LOGO_CACHE.get(cacheKey);
+  }
+
+  const color = identity.color;
+  const shadowColor = mixHex(color, "#000000", 0.42);
+  const highlightColor = mixHex(color, "#ffffff", 0.3);
+  const textColor = identity.textColor;
+  const outlineColor = textColor === "#101311" ? "#101311" : "#ffffff";
+  const outlineOpacity = textColor === "#101311" ? "0.24" : "0.36";
+  const code = escapeSvgText(identity.code || "?");
+  const motif = motifPath(identity.motif);
+  const svg = `
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 40" role="img">
+  <defs>
+    <linearGradient id="paint" x1="0" y1="0" x2="64" y2="40" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="${highlightColor}"/>
+      <stop offset=".44" stop-color="${color}"/>
+      <stop offset="1" stop-color="${shadowColor}"/>
+    </linearGradient>
+    <clipPath id="clip">
+      <rect x="1.5" y="1.5" width="61" height="37" rx="7"/>
+    </clipPath>
+  </defs>
+  <rect x="1" y="1" width="62" height="38" rx="8" fill="#0d100f"/>
+  <g clip-path="url(#clip)" style="color:${textColor}">
+    <rect x="1.5" y="1.5" width="61" height="37" fill="url(#paint)"/>
+    ${motif}
+    <path d="M4 7 H60" stroke="${outlineColor}" stroke-width="2" opacity="${outlineOpacity}"/>
+    <path d="M4 33 H60" stroke="#000" stroke-width="2" opacity=".16"/>
+  </g>
+  <rect x="1" y="1" width="62" height="38" rx="8" fill="none" stroke="${outlineColor}" stroke-width="2" opacity="${outlineOpacity}"/>
+  <text x="32" y="25.5" text-anchor="middle" fill="${textColor}" font-family="Arial Black, Arial, sans-serif" font-size="13" font-weight="900" letter-spacing=".5">${code}</text>
+</svg>`.trim();
+  const dataUri = `data:image/svg+xml,${encodeURIComponent(svg)}`;
+
+  LOGO_CACHE.set(cacheKey, dataUri);
+  return dataUri;
+}
+
+export function constructorLogoSrc(identity) {
+  if (identity.logoFile) {
+    return `${import.meta.env.BASE_URL}team-logos/${identity.logoFile}`;
+  }
+
+  return constructorLogoDataUri(identity);
 }
