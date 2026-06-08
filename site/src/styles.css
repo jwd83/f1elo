@@ -340,6 +340,99 @@ input[type="range"] {
   color: var(--yellow);
 }
 
+.snapshot-leader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.snapshot-leader > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.team-mark,
+.team-code {
+  display: inline-grid;
+  place-items: center;
+  border-radius: 3px;
+  background: var(--team-color, var(--red));
+  color: var(--team-text, #101311);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-weight: 900;
+  letter-spacing: 0;
+}
+
+.team-mark {
+  width: 34px;
+  height: 20px;
+  flex: 0 0 34px;
+  font-size: 0.66rem;
+  line-height: 1;
+}
+
+.team-strip {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  max-width: 100%;
+  gap: 6px;
+  overflow: hidden;
+}
+
+.team-strip.empty {
+  color: var(--muted);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+}
+
+.team-badge {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  max-width: 100%;
+  gap: 6px;
+  border: 1px solid color-mix(in srgb, var(--team-color, var(--red)) 72%, var(--line));
+  border-radius: 4px;
+  padding: 2px 7px 2px 2px;
+  background:
+    linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--team-color, var(--red)) 20%, transparent),
+      rgba(255, 255, 255, 0.035)
+    ),
+    var(--track-2);
+}
+
+.team-code {
+  min-width: 32px;
+  height: 20px;
+  padding: 0 5px;
+  font-size: 0.64rem;
+  line-height: 1;
+}
+
+.team-name {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 0.78rem;
+  font-weight: 750;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.team-more {
+  flex: 0 0 auto;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 3px 6px;
+  background: var(--panel-2);
+  color: var(--muted);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.68rem;
+}
+
 .chart-panel {
   min-width: 0;
 }
@@ -370,7 +463,7 @@ input[type="range"] {
 .bar-track {
   position: relative;
   min-width: 0;
-  height: 30px;
+  height: 34px;
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 4px;
@@ -380,18 +473,30 @@ input[type="range"] {
 .bar-fill {
   position: absolute;
   inset: 0 auto 0 0;
-  background: linear-gradient(90deg, var(--red), var(--yellow));
+  background: linear-gradient(
+    90deg,
+    var(--team-color, var(--red)),
+    color-mix(in srgb, var(--team-color, var(--red)) 45%, var(--yellow))
+  );
 }
 
 .bar-track strong {
   position: relative;
   z-index: 1;
-  display: block;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 8px;
   overflow: hidden;
-  padding: 7px 9px;
-  color: #0e0a07;
-  text-overflow: ellipsis;
+  padding: 6px 9px;
+  color: var(--text);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.75);
   white-space: nowrap;
+}
+
+.bar-track strong > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .workspace-grid {
@@ -483,16 +588,27 @@ input[type="range"] {
 }
 
 .leaderboard-table tbody tr {
+  --team-color: var(--red);
   cursor: pointer;
 }
 
 .leaderboard-table tbody tr:hover,
 .leaderboard-table tbody tr.selected {
-  background: rgba(61, 246, 170, 0.09);
+  background:
+    linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--team-color) 18%, transparent),
+      rgba(61, 246, 170, 0.07) 48%,
+      rgba(61, 246, 170, 0.04)
+    );
+}
+
+.leaderboard-table tbody td:first-child {
+  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--team-color) 78%, var(--line));
 }
 
 .leaderboard-table tbody tr.selected td:first-child {
-  box-shadow: inset 4px 0 0 var(--red);
+  box-shadow: inset 5px 0 0 var(--team-color);
 }
 
 .rank-cell,
@@ -504,7 +620,11 @@ input[type="range"] {
 }
 
 .entity-pick {
+  display: inline-flex;
+  align-items: center;
   max-width: 210px;
+  min-width: 0;
+  gap: 8px;
   overflow: hidden;
   border: 0;
   padding: 0;
@@ -515,6 +635,16 @@ input[type="range"] {
   text-align: left;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.entity-name-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.constructor-cell {
+  max-width: 280px;
 }
 
 .table-footer {
@@ -530,6 +660,8 @@ input[type="range"] {
 .detail-panel {
   position: sticky;
   top: 14px;
+  --team-color: var(--red);
+  border-top: 3px solid var(--team-color);
 }
 
 .detail-hero {
@@ -558,16 +690,28 @@ input[type="range"] {
   overflow-wrap: anywhere;
 }
 
+.detail-team-strip {
+  flex-wrap: wrap;
+  margin-top: 8px;
+  overflow: visible;
+}
+
 .score-badge {
   display: flex;
   align-items: center;
   gap: 8px;
   min-width: 110px;
   justify-content: center;
-  border: 1px solid var(--line-hot);
+  border: 1px solid color-mix(in srgb, var(--team-color) 76%, var(--line-hot));
   border-radius: 6px;
   padding: 10px;
-  background: rgba(239, 62, 54, 0.14);
+  background:
+    linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--team-color) 18%, transparent),
+      rgba(239, 62, 54, 0.08)
+    ),
+    var(--track-2);
   color: var(--yellow);
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
 }
@@ -611,14 +755,21 @@ input[type="range"] {
 }
 
 .race-row {
+  --team-color: var(--red);
   display: grid;
-  grid-template-columns: 44px minmax(0, 1fr) 126px;
+  grid-template-columns: 44px minmax(0, 1fr) 154px;
   gap: 10px;
   align-items: center;
   border: 1px solid var(--line);
+  border-left: 3px solid var(--team-color);
   border-radius: 6px;
   padding: 9px;
-  background: var(--track-2);
+  background:
+    linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--team-color) 13%, var(--track-2)),
+      var(--track-2) 42%
+    );
 }
 
 .constructor-race-row {
@@ -650,6 +801,16 @@ input[type="range"] {
   margin-top: 3px;
   color: var(--muted);
   font-size: 0.74rem;
+}
+
+.race-team-strip {
+  margin-top: 6px;
+}
+
+.race-team-strip .team-code {
+  min-width: 28px;
+  height: 18px;
+  font-size: 0.6rem;
 }
 
 .race-result {

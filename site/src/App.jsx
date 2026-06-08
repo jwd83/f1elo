@@ -10,6 +10,14 @@ import {
   X,
 } from "lucide-react";
 import { loadDatabase, queryRows } from "./db.js";
+import {
+  constructorIdentities,
+  constructorIds,
+  getConstructorIdentity,
+  primaryConstructorId,
+  teamAccentStyle,
+  teamIdentityStyle,
+} from "./teamIdentity.js";
 
 const DEFAULT_MODEL = {
   mode: "driver",
@@ -55,13 +63,6 @@ function toNumber(value) {
   return Number.isFinite(number) ? number : 0;
 }
 
-function titleize(value) {
-  return String(value)
-    .split("-")
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" ");
-}
-
 function modelScore(row, model) {
   const qualifyingLoss =
     model.qualifyingSource === "grid"
@@ -81,20 +82,10 @@ function rowKey(row, mode) {
 }
 
 function constructorNames(value, constructors) {
-  if (!value) {
-    return "-";
-  }
-  return String(value)
-    .split("/")
-    .map((id) => constructors.get(id) || titleize(id))
-    .join(" / ");
-}
-
-function constructorIds(value) {
-  if (!value) {
-    return [];
-  }
-  return String(value).split("/").filter(Boolean);
+  const identities = constructorIdentities(value, constructors);
+  return identities.length
+    ? identities.map((identity) => identity.name).join(" / ")
+    : "-";
 }
 
 function uniqueChronologicalConstructorIds(rows) {
@@ -158,8 +149,10 @@ function comparePeakRows(a, b) {
 
 function normalizeSeasonRow(row, mode, constructors, model) {
   if (mode === "constructor") {
-    const constructorName =
-      row.constructor_name || constructors.get(row.constructor_id) || titleize(row.constructor_id);
+    const constructorName = getConstructorIdentity(
+      row.constructor_id,
+      constructors,
+    ).name;
 
     return {
       ...row,
@@ -516,8 +509,9 @@ function App() {
               leader={leader}
               rows={scoredRows}
               seasonRows={activeSeasonRows}
+              constructors={constructors}
             />
-            <TopChart rows={scoredRows.slice(0, 8)} />
+            <TopChart rows={scoredRows.slice(0, 8)} constructors={constructors} />
           </section>
 
           <section className="workspace-grid">
@@ -558,6 +552,7 @@ function App() {
                 selectedKey={selectedRow?.key}
                 isMultiSeason={isMultiSeason}
                 mode={model.mode}
+                constructors={constructors}
                 onSelect={selectRow}
               />
 
@@ -575,6 +570,7 @@ function App() {
               raceRows={raceRows}
               model={model}
               mode={model.mode}
+              constructors={constructors}
             />
           </section>
         </>
@@ -735,7 +731,89 @@ function Slider({ label, value, displayValue, min, max, step, onChange }) {
   );
 }
 
-function TimingSnapshot({ leader, rows, seasonRows }) {
+function TeamMark({ identity }) {
+  return (
+    <span
+      className="team-mark"
+      style={teamIdentityStyle(identity)}
+      title={identity.name}
+      aria-hidden="true"
+    >
+      {identity.code}
+    </span>
+  );
+}
+
+function TeamBadge({ identity, showName = true }) {
+  return (
+    <span
+      className="team-badge"
+      style={teamIdentityStyle(identity)}
+      title={identity.name}
+      aria-label={`${identity.code} ${identity.name}`}
+    >
+      <span className="team-code">{identity.code}</span>
+      {showName ? <span className="team-name">{identity.name}</span> : null}
+    </span>
+  );
+}
+
+function TeamBadgeList({
+  value,
+  constructors,
+  maxVisible = Number.POSITIVE_INFINITY,
+  showNames = true,
+  className = "",
+}) {
+  const identities = constructorIdentities(value, constructors);
+
+  if (!identities.length) {
+    return <span className={`team-strip empty ${className}`.trim()}>-</span>;
+  }
+
+  const visibleCount = Number.isFinite(maxVisible)
+    ? Math.max(0, maxVisible)
+    : identities.length;
+  const visible = identities.slice(0, visibleCount);
+  const hiddenCount = identities.length - visible.length;
+  const title = identities
+    .map((identity) => `${identity.name} (${identity.code})`)
+    .join(" / ");
+
+  return (
+    <span className={`team-strip ${className}`.trim()} title={title}>
+      {visible.map((identity) => (
+        <TeamBadge
+          identity={identity}
+          showName={showNames}
+          key={identity.id || identity.name}
+        />
+      ))}
+      {hiddenCount > 0 ? <span className="team-more">+{hiddenCount}</span> : null}
+    </span>
+  );
+}
+
+function EntityPick({ row, constructors, onSelect }) {
+  const identity = getConstructorIdentity(primaryConstructorId(row), constructors);
+
+  return (
+    <button
+      className="entity-pick"
+      type="button"
+      onClick={() => onSelect(row)}
+    >
+      <TeamMark identity={identity} />
+      <span className="entity-name-text">{row.entity_name}</span>
+    </button>
+  );
+}
+
+function TimingSnapshot({ leader, rows, seasonRows, constructors }) {
+  const leaderIdentity = leader
+    ? getConstructorIdentity(primaryConstructorId(leader), constructors)
+    : null;
+
   return (
     <section className="snapshot-panel" aria-label="Timing snapshot">
       <div className="metric">
@@ -748,8 +826,9 @@ function TimingSnapshot({ leader, rows, seasonRows }) {
       </div>
       <div className="metric">
         <span>P1</span>
-        <strong>
-          {leader ? `${leader.entity_name} ${leader.season_label}` : "-"}
+        <strong className="snapshot-leader">
+          {leaderIdentity ? <TeamMark identity={leaderIdentity} /> : null}
+          <span>{leader ? `${leader.entity_name} ${leader.season_label}` : "-"}</span>
         </strong>
       </div>
       <div className="metric accent">
@@ -760,7 +839,7 @@ function TimingSnapshot({ leader, rows, seasonRows }) {
   );
 }
 
-function TopChart({ rows }) {
+function TopChart({ rows, constructors }) {
   const maxScore = rows[0]?.computed_score || 1;
   const minScore = rows[rows.length - 1]?.computed_score || 0;
   const spread = Math.max(maxScore - minScore, 1);
@@ -777,13 +856,24 @@ function TopChart({ rows }) {
       <div className="bar-list">
         {rows.map((row) => {
           const width = 44 + ((row.computed_score - minScore) / spread) * 56;
+          const identity = getConstructorIdentity(
+            primaryConstructorId(row),
+            constructors,
+          );
+
           return (
             <div className="bar-row" key={row.key}>
               <span>{row.computed_rank}</span>
-              <div className="bar-track">
+              <div
+                className="bar-track"
+                style={teamIdentityStyle(identity)}
+              >
                 <div className="bar-fill" style={{ width: `${width}%` }} />
                 <strong>
-                  {row.entity_name} {row.season_label}
+                  <TeamMark identity={identity} />
+                  <span>
+                    {row.entity_name} {row.season_label}
+                  </span>
                 </strong>
               </div>
               <span>{formatNumber(row.computed_score, 0)}</span>
@@ -795,7 +885,14 @@ function TopChart({ rows }) {
   );
 }
 
-function LeaderboardTable({ rows, selectedKey, isMultiSeason, mode, onSelect }) {
+function LeaderboardTable({
+  rows,
+  selectedKey,
+  isMultiSeason,
+  mode,
+  constructors,
+  onSelect,
+}) {
   const isConstructorMode = mode === "constructor";
 
   return (
@@ -821,19 +918,26 @@ function LeaderboardTable({ rows, selectedKey, isMultiSeason, mode, onSelect }) 
               className={row.key === selectedKey ? "selected" : ""}
               key={row.key}
               onClick={() => onSelect(row)}
+              style={teamAccentStyle(row, constructors)}
             >
               <td className="rank-cell">{row.computed_rank}</td>
               <td className="season-cell">{row.season_label}</td>
               <td>
-                <button
-                  className="entity-pick"
-                  type="button"
-                  onClick={() => onSelect(row)}
-                >
-                  {row.entity_name}
-                </button>
+                <EntityPick
+                  row={row}
+                  constructors={constructors}
+                  onSelect={onSelect}
+                />
               </td>
-              {isConstructorMode ? null : <td>{row.constructor_names}</td>}
+              {isConstructorMode ? null : (
+                <td className="constructor-cell">
+                  <TeamBadgeList
+                    value={row.constructors}
+                    constructors={constructors}
+                    maxVisible={3}
+                  />
+                </td>
+              )}
               <td className="score-cell">{formatNumber(row.computed_score, 1)}</td>
               <td>
                 {row.entries}/{row.scheduled_races}
@@ -850,7 +954,7 @@ function LeaderboardTable({ rows, selectedKey, isMultiSeason, mode, onSelect }) 
   );
 }
 
-function SeasonDetail({ row, raceRows, model, mode }) {
+function SeasonDetail({ row, raceRows, model, mode, constructors }) {
   const isConstructorMode = mode === "constructor";
 
   if (!row) {
@@ -878,14 +982,18 @@ function SeasonDetail({ row, raceRows, model, mode }) {
       : "Season trace";
 
   return (
-    <aside className="detail-panel">
+    <aside className="detail-panel" style={teamAccentStyle(row, constructors)}>
       <div className="detail-hero">
         <div>
           <p className="eyebrow">{traceLabel}</p>
           <h2>
             {row.entity_name} <span>{row.season_label}</span>
           </h2>
-          <p>{isConstructorMode ? row.constructor_id : row.constructor_names}</p>
+          <TeamBadgeList
+            value={row.constructors || row.constructor_id}
+            constructors={constructors}
+            className="detail-team-strip"
+          />
         </div>
         <div className="score-badge">
           <Trophy size={18} aria-hidden="true" />
@@ -939,6 +1047,7 @@ function SeasonDetail({ row, raceRows, model, mode }) {
                 className={`race-row ${
                   isConstructorMode ? "constructor-race-row" : ""
                 }`}
+                style={teamAccentStyle(race, constructors)}
               >
                 <div className="race-round">
                   <Flag size={14} aria-hidden="true" />
@@ -947,6 +1056,15 @@ function SeasonDetail({ row, raceRows, model, mode }) {
                 <div className="race-main">
                   <strong>{race.grand_prix_name}</strong>
                   <span>{race.circuit_name || race.official_name}</span>
+                  {isConstructorMode ? null : (
+                    <TeamBadgeList
+                      value={race.constructor_id}
+                      constructors={constructors}
+                      maxVisible={1}
+                      showNames={false}
+                      className="race-team-strip"
+                    />
+                  )}
                 </div>
                 {isConstructorMode ? (
                   <div className="race-result constructor-race-result">
