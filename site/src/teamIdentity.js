@@ -204,7 +204,7 @@ export function constructorIds(value) {
     return [];
   }
 
-  const rawIds = Array.isArray(value) ? value : String(value).split("/");
+  const rawIds = Array.isArray(value) ? value : String(value).split(/[\/,]/);
   const seen = new Set();
 
   return rawIds

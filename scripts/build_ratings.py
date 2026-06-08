@@ -16,6 +16,9 @@ from typing import Iterable
 
 DEFAULT_INPUT_DIR = Path("data/raw/f1db-v2026.5.1")
 DEFAULT_OUTPUT_DIR = Path("data/output")
+LEGACY_INDY500_GRAND_PRIX_ID = "indianapolis"
+LEGACY_INDY500_FIRST_YEAR = 1950
+LEGACY_INDY500_LAST_YEAR = 1960
 
 
 @dataclass
@@ -29,12 +32,16 @@ class DriverSeason:
     finish_loss_sum: float = 0.0
     qualifying_loss_sum: float = 0.0
     grid_loss_sum: float = 0.0
+    missed_finish_loss_sum: float = 0.0
+    missed_qualifying_loss_sum: float = 0.0
+    missed_grid_loss_sum: float = 0.0
     wins: int = 0
     podiums: int = 0
     poles: int = 0
     grid_poles: int = 0
     points: float = 0.0
     constructors: set[str] = field(default_factory=set)
+    entered_race_ids: set[str] = field(default_factory=set)
 
     @property
     def race_share(self) -> float:
@@ -44,15 +51,53 @@ class DriverSeason:
 
     @property
     def avg_finish_loss(self) -> float:
+        if self.entries == 0:
+            return 0.0
         return self.finish_loss_sum / self.entries
 
     @property
     def avg_qualifying_loss(self) -> float:
+        if self.entries == 0:
+            return 0.0
         return self.qualifying_loss_sum / self.entries
 
     @property
     def avg_grid_loss(self) -> float:
+        if self.entries == 0:
+            return 0.0
         return self.grid_loss_sum / self.entries
+
+    @property
+    def missed_completed_races(self) -> int:
+        return max(self.completed_races - self.entries, 0)
+
+    @property
+    def score_denominator(self) -> int:
+        return max(self.completed_races, self.entries, 1)
+
+    @property
+    def avg_scored_finish_loss(self) -> float:
+        return (self.finish_loss_sum + self.missed_finish_loss_sum) / self.score_denominator
+
+    @property
+    def avg_scored_qualifying_loss(self) -> float:
+        return (self.qualifying_loss_sum + self.missed_qualifying_loss_sum) / self.score_denominator
+
+    @property
+    def avg_scored_grid_loss(self) -> float:
+        return (self.grid_loss_sum + self.missed_grid_loss_sum) / self.score_denominator
+
+
+@dataclass
+class DriverRace:
+    year: int
+    race_id: str
+    driver_id: str
+    finish_position: int
+    qualifying_position: int
+    grid_position: int
+    points: float = 0.0
+    constructors: set[str] = field(default_factory=set)
 
 
 def parse_args() -> argparse.Namespace:
@@ -125,6 +170,22 @@ def parse_args() -> argparse.Namespace:
         default=3,
         help="Number of latest completed seasons to write to driver_season_last_3_completed.csv.",
     )
+    parser.add_argument(
+        "--include-legacy-indy500",
+        action="store_true",
+        dest="include_legacy_indy500",
+        help=(
+            "Include the Indianapolis 500 races that counted toward the World "
+            "Championship from 1950 through 1960. This is the default."
+        ),
+    )
+    parser.add_argument(
+        "--exclude-legacy-indy500",
+        action="store_false",
+        dest="include_legacy_indy500",
+        help="Exclude the 1950 through 1960 Indianapolis 500 races from the rating CSVs.",
+    )
+    parser.set_defaults(include_legacy_indy500=True)
     return parser.parse_args()
 
 
@@ -172,12 +233,26 @@ def load_driver_names(input_dir: Path) -> dict[str, str]:
     return {row["id"]: row["name"] for row in rows}
 
 
-def load_scheduled_races(input_dir: Path) -> dict[int, int]:
+def is_legacy_indy500_race(row: dict[str, str]) -> bool:
+    return (
+        row.get("grandPrixId") == LEGACY_INDY500_GRAND_PRIX_ID
+        and LEGACY_INDY500_FIRST_YEAR <= int(row["year"]) <= LEGACY_INDY500_LAST_YEAR
+    )
+
+
+def load_legacy_indy500_race_ids(input_dir: Path) -> set[str]:
     rows = read_csv(required_csv(input_dir, "f1db-races.csv"))
-    counts: dict[int, int] = defaultdict(int)
+    return {row["id"] for row in rows if is_legacy_indy500_race(row)}
+
+
+def load_scheduled_race_ids(input_dir: Path, include_legacy_indy500: bool) -> dict[int, set[str]]:
+    rows = read_csv(required_csv(input_dir, "f1db-races.csv"))
+    race_ids: dict[int, set[str]] = defaultdict(set)
     for row in rows:
-        counts[int(row["year"])] += 1
-    return dict(counts)
+        if not include_legacy_indy500 and is_legacy_indy500_race(row):
+            continue
+        race_ids[int(row["year"])].add(row["id"])
+    return dict(race_ids)
 
 
 def result_field_sizes(results: Iterable[dict[str, str]]) -> dict[str, int]:
@@ -204,19 +279,25 @@ def position_or_back_marker(value: str | None, field_size: int) -> int:
 def build_driver_seasons(args: argparse.Namespace) -> list[DriverSeason]:
     input_dir = args.input_dir
     driver_names = load_driver_names(input_dir)
-    scheduled_races = load_scheduled_races(input_dir)
+    scheduled_race_ids = load_scheduled_race_ids(input_dir, args.include_legacy_indy500)
+    scheduled_races = {year: len(race_ids) for year, race_ids in scheduled_race_ids.items()}
+    legacy_indy500_race_ids = load_legacy_indy500_race_ids(input_dir)
     results = read_csv(required_csv(input_dir, "f1db-races-race-results.csv"))
+    if not args.include_legacy_indy500:
+        results = [row for row in results if row["raceId"] not in legacy_indy500_race_ids]
     field_sizes = result_field_sizes(results)
     completed_races = completed_races_by_year(results)
     max_field_size = max(field_sizes.values(), default=0) + 1
     harmonic = harmonic_numbers(max_field_size)
 
+    driver_races: dict[tuple[int, str, str], DriverRace] = {}
     seasons: dict[tuple[int, str], DriverSeason] = {}
 
     for row in results:
         year = int(row["year"])
+        race_id = row["raceId"]
         driver_id = row["driverId"]
-        field_size = field_sizes[row["raceId"]]
+        field_size = field_sizes[race_id]
         finish_position = position_or_back_marker(row.get("positionDisplayOrder"), field_size)
         grid_position = position_or_back_marker(row.get("gridPositionNumber"), field_size)
 
@@ -224,6 +305,28 @@ def build_driver_seasons(args: argparse.Namespace) -> list[DriverSeason]:
         if args.qualifying_source == "grid" or qualifying_position is None or qualifying_position <= 0:
             qualifying_position = grid_position
 
+        race_key = (year, race_id, driver_id)
+        if race_key not in driver_races:
+            driver_races[race_key] = DriverRace(
+                year=year,
+                race_id=race_id,
+                driver_id=driver_id,
+                finish_position=finish_position,
+                qualifying_position=qualifying_position,
+                grid_position=grid_position,
+            )
+
+        driver_race = driver_races[race_key]
+        driver_race.finish_position = min(driver_race.finish_position, finish_position)
+        driver_race.qualifying_position = min(driver_race.qualifying_position, qualifying_position)
+        driver_race.grid_position = min(driver_race.grid_position, grid_position)
+        driver_race.points += float_or_zero(row.get("points"))
+        if row.get("constructorId"):
+            driver_race.constructors.add(row["constructorId"])
+
+    for driver_race in driver_races.values():
+        year = driver_race.year
+        driver_id = driver_race.driver_id
         key = (year, driver_id)
         if key not in seasons:
             seasons[key] = DriverSeason(
@@ -236,16 +339,28 @@ def build_driver_seasons(args: argparse.Namespace) -> list[DriverSeason]:
 
         season = seasons[key]
         season.entries += 1
-        season.finish_loss_sum += harmonic[min(finish_position - 1, max_field_size)]
-        season.qualifying_loss_sum += harmonic[min(qualifying_position - 1, max_field_size)]
-        season.grid_loss_sum += harmonic[min(grid_position - 1, max_field_size)]
-        season.wins += int(finish_position == 1)
-        season.podiums += int(finish_position <= 3)
-        season.poles += int(qualifying_position == 1)
-        season.grid_poles += int(grid_position == 1)
-        season.points += float_or_zero(row.get("points"))
-        if row.get("constructorId"):
-            season.constructors.add(row["constructorId"])
+        season.entered_race_ids.add(driver_race.race_id)
+        season.finish_loss_sum += harmonic[min(driver_race.finish_position - 1, max_field_size)]
+        season.qualifying_loss_sum += harmonic[min(driver_race.qualifying_position - 1, max_field_size)]
+        season.grid_loss_sum += harmonic[min(driver_race.grid_position - 1, max_field_size)]
+        season.wins += int(driver_race.finish_position == 1)
+        season.podiums += int(driver_race.finish_position <= 3)
+        season.poles += int(driver_race.qualifying_position == 1)
+        season.grid_poles += int(driver_race.grid_position == 1)
+        season.points += driver_race.points
+        season.constructors.update(driver_race.constructors)
+
+    completed_race_ids_by_year: dict[int, set[str]] = defaultdict(set)
+    for row in results:
+        completed_race_ids_by_year[int(row["year"])].add(row["raceId"])
+
+    for season in seasons.values():
+        missed_race_ids = completed_race_ids_by_year.get(season.year, set()) - season.entered_race_ids
+        for race_id in missed_race_ids:
+            missed_loss = harmonic[min(field_sizes[race_id], max_field_size)]
+            season.missed_finish_loss_sum += missed_loss
+            season.missed_qualifying_loss_sum += missed_loss
+            season.missed_grid_loss_sum += missed_loss
 
     return list(seasons.values())
 
@@ -253,8 +368,8 @@ def build_driver_seasons(args: argparse.Namespace) -> list[DriverSeason]:
 def rating(season: DriverSeason, args: argparse.Namespace) -> float:
     return (
         args.base_rating
-        - args.finish_weight * season.avg_finish_loss
-        - args.qualifying_weight * season.avg_qualifying_loss
+        - args.finish_weight * season.avg_scored_finish_loss
+        - args.qualifying_weight * season.avg_scored_qualifying_loss
     )
 
 
@@ -280,6 +395,7 @@ def ranked_rows(seasons: list[DriverSeason], args: argparse.Namespace) -> list[d
                 "completed_races": season.completed_races,
                 "entries": season.entries,
                 "race_share": season.race_share,
+                "missed_completed_races": season.missed_completed_races,
                 "wins": season.wins,
                 "win_rate": pct(season.wins, season.entries),
                 "podiums": season.podiums,
@@ -291,9 +407,15 @@ def ranked_rows(seasons: list[DriverSeason], args: argparse.Namespace) -> list[d
                 "avg_finish_harmonic_loss": season.avg_finish_loss,
                 "avg_qualifying_harmonic_loss": season.avg_qualifying_loss,
                 "avg_grid_harmonic_loss": season.avg_grid_loss,
+                "avg_scored_finish_harmonic_loss": season.avg_scored_finish_loss,
+                "avg_scored_qualifying_harmonic_loss": season.avg_scored_qualifying_loss,
+                "avg_scored_grid_harmonic_loss": season.avg_scored_grid_loss,
                 "finish_loss_sum": season.finish_loss_sum,
                 "qualifying_loss_sum": season.qualifying_loss_sum,
                 "grid_loss_sum": season.grid_loss_sum,
+                "missed_finish_loss_sum": season.missed_finish_loss_sum,
+                "missed_qualifying_loss_sum": season.missed_qualifying_loss_sum,
+                "missed_grid_loss_sum": season.missed_grid_loss_sum,
             }
         )
 
@@ -327,6 +449,7 @@ def write_csv(path: Path, rows: list[dict[str, object]]) -> None:
         "completed_races",
         "entries",
         "race_share",
+        "missed_completed_races",
         "wins",
         "win_rate",
         "podiums",
@@ -338,9 +461,15 @@ def write_csv(path: Path, rows: list[dict[str, object]]) -> None:
         "avg_finish_harmonic_loss",
         "avg_qualifying_harmonic_loss",
         "avg_grid_harmonic_loss",
+        "avg_scored_finish_harmonic_loss",
+        "avg_scored_qualifying_harmonic_loss",
+        "avg_scored_grid_harmonic_loss",
         "finish_loss_sum",
         "qualifying_loss_sum",
         "grid_loss_sum",
+        "missed_finish_loss_sum",
+        "missed_qualifying_loss_sum",
+        "missed_grid_loss_sum",
     ]
     fieldnames = [name for name in preferred_order if name in rows[0]]
 
@@ -364,8 +493,9 @@ def write_metadata(path: Path, args: argparse.Namespace, rows: list[dict[str, ob
         },
         "formula": {
             "description": (
-                "score = base_rating - finish_weight * avg(H(finish_position - 1)) "
-                "- qualifying_weight * avg(H(qualifying_position - 1))"
+                "score = base_rating - finish_weight * avg_scored(H(finish_position - 1)) "
+                "- qualifying_weight * avg_scored(H(qualifying_position - 1)); "
+                "missed completed races count as back-marker harmonic losses"
             ),
             "base_rating": args.base_rating,
             "finish_weight": args.finish_weight,
@@ -378,6 +508,7 @@ def write_metadata(path: Path, args: argparse.Namespace, rows: list[dict[str, ob
             "min_entries": args.qualified_min_entries,
         },
         "recent_completed_seasons": args.recent_completed_seasons,
+        "include_legacy_indy500": args.include_legacy_indy500,
         "row_count": len(rows),
         "first_year": min(years) if years else None,
         "last_year": max(years) if years else None,

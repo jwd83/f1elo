@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-06-08T00:10:19.930538+00:00",
+  "generated_at": "2026-06-08T01:57:35.768449+00:00",
   "input_dir": "/Users/jared/Documents/f1elo/data/raw/f1db-v2026.5.1",
   "outputs": {
     "driver_season_ratings": "driver_season_ratings.csv",
@@ -8,7 +8,7 @@
     "driver_season_last_3_completed": "driver_season_last_3_completed.csv"
   },
   "formula": {
-    "description": "score = base_rating - finish_weight * avg(H(finish_position - 1)) - qualifying_weight * avg(H(qualifying_position - 1))",
+    "description": "score = base_rating - finish_weight * avg_scored(H(finish_position - 1)) - qualifying_weight * avg_scored(H(qualifying_position - 1)); missed completed races count as back-marker harmonic losses",
     "base_rating": 3000.0,
     "finish_weight": 225.0,
     "qualifying_weight": 75.0,
@@ -20,6 +20,7 @@
     "min_entries": 4
   },
   "recent_completed_seasons": 3,
+  "include_legacy_indy500": true,
   "row_count": 3265,
   "first_year": 1950,
   "last_year": 2026

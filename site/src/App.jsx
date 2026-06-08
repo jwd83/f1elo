@@ -28,6 +28,7 @@ const DEFAULT_MODEL = {
   qualifyingSource: "qualifying",
   multiSeasonPeak: 1,
   includeIncomplete: false,
+  includeLegacyIndy500: true,
   minRaceShare: 0.75,
   minEntries: 4,
 };
@@ -65,21 +66,25 @@ function toNumber(value) {
 }
 
 function modelScore(row, model) {
+  const finishLoss =
+    row.avg_scored_finish_harmonic_loss ??
+    row.avg_finish_harmonic_loss;
   const qualifyingLoss =
     model.qualifyingSource === "grid"
-      ? toNumber(row.avg_grid_harmonic_loss)
-      : toNumber(row.avg_qualifying_harmonic_loss);
+      ? (row.avg_scored_grid_harmonic_loss ?? row.avg_grid_harmonic_loss)
+      : (row.avg_scored_qualifying_harmonic_loss ??
+        row.avg_qualifying_harmonic_loss);
 
   return (
     toNumber(model.baseRating) -
-    toNumber(model.finishWeight) * toNumber(row.avg_finish_harmonic_loss) -
-    toNumber(model.qualifyingWeight) * qualifyingLoss
+    toNumber(model.finishWeight) * toNumber(finishLoss) -
+    toNumber(model.qualifyingWeight) * toNumber(qualifyingLoss)
   );
 }
 
 function rowKey(row, mode) {
   const entityId = mode === "constructor" ? row.constructor_id : row.driver_id;
-  return `${mode}:${row.year}:${entityId}`;
+  return `${mode}:${toNumber(row.includes_legacy_indy500)}:${row.year}:${entityId}`;
 }
 
 function constructorNames(value, constructors) {
@@ -219,6 +224,18 @@ function buildPeakRows(rows, model, constructors, peakSize) {
         "avg_qualifying_harmonic_loss",
       );
       const avgGridLoss = average(selectedChronological, "avg_grid_harmonic_loss");
+      const avgScoredFinishLoss = average(
+        selectedChronological,
+        "avg_scored_finish_harmonic_loss",
+      );
+      const avgScoredQualifyingLoss = average(
+        selectedChronological,
+        "avg_scored_qualifying_harmonic_loss",
+      );
+      const avgScoredGridLoss = average(
+        selectedChronological,
+        "avg_scored_grid_harmonic_loss",
+      );
       const activePoles = selectedChronological.reduce(
         (total, row) => total + activePoleCount(row, model),
         0,
@@ -232,12 +249,15 @@ function buildPeakRows(rows, model, constructors, peakSize) {
         driver_name: firstRow.driver_name,
         constructor_id: firstRow.constructor_id,
         constructor_name: firstRow.constructor_name,
-        key: `${firstRow.entity_type}:peak:${peakSize}:${firstRow.entity_id}`,
+        key: `${firstRow.entity_type}:peak:${toNumber(
+          firstRow.includes_legacy_indy500,
+        )}:${peakSize}:${firstRow.entity_id}`,
         year: `(${selectedYears.join(", ")})`,
         season_label: `(${selectedYears.join(", ")})`,
         selected_years: selectedYears,
         season_rows: selectedChronological,
         is_peak: true,
+        includes_legacy_indy500: firstRow.includes_legacy_indy500,
         constructors: constructorIdList.join("/"),
         constructor_names: constructorNames(constructorIdList.join("/"), constructors),
         computed_score: average(selectedChronological, "computed_score"),
@@ -258,6 +278,13 @@ function buildPeakRows(rows, model, constructors, peakSize) {
         avg_finish_harmonic_loss: avgFinishLoss,
         avg_qualifying_harmonic_loss: avgQualifyingLoss,
         avg_grid_harmonic_loss: avgGridLoss,
+        avg_scored_finish_harmonic_loss: avgScoredFinishLoss,
+        avg_scored_qualifying_harmonic_loss: avgScoredQualifyingLoss,
+        avg_scored_grid_harmonic_loss: avgScoredGridLoss,
+        missed_completed_races: sum(
+          selectedChronological,
+          "missed_completed_races",
+        ),
         is_completed_season: selectedChronological.every(
           (row) => row.is_completed_season === 1,
         )
@@ -384,10 +411,18 @@ function App() {
   const activeSeasonRows = isConstructorMode
     ? constructorSeasonRows
     : driverSeasonRows;
+  const activeDatasetFlag = model.includeLegacyIndy500 ? 1 : 0;
+  const scopedSeasonRows = useMemo(
+    () =>
+      activeSeasonRows.filter(
+        (row) => toNumber(row.includes_legacy_indy500) === activeDatasetFlag,
+      ),
+    [activeDatasetFlag, activeSeasonRows],
+  );
 
   const scoredRows = useMemo(() => {
     const normalizedSearch = search.trim().toLowerCase();
-    const eligibleSeasonRows = activeSeasonRows
+    const eligibleSeasonRows = scopedSeasonRows
       .map((row) => normalizeSeasonRow(row, model.mode, constructors, model))
       .filter((row) => model.includeIncomplete || row.is_completed_season === 1)
       .filter((row) => toNumber(row.race_share) >= toNumber(model.minRaceShare))
@@ -403,7 +438,7 @@ function App() {
           .sort(compareSeasonRows);
 
     return rows.map((row, index) => ({ ...row, computed_rank: index + 1 }));
-  }, [activeSeasonRows, constructors, isMultiSeason, model, peakSize, search]);
+  }, [constructors, isMultiSeason, model, peakSize, scopedSeasonRows, search]);
 
   const tableRows = scoredRows.slice(0, 250);
   const selectedRow = useMemo(() => {
@@ -445,6 +480,7 @@ function App() {
 
     const selectedYears = selectedRow.selected_years || [selectedRow.year];
     const placeholders = selectedYears.map(() => "?").join(", ");
+    const selectedScope = toNumber(selectedRow.includes_legacy_indy500);
     const raceView = isConstructorMode
       ? "constructor_season_race_results"
       : "driver_season_race_results";
@@ -454,13 +490,21 @@ function App() {
       `
         SELECT *
         FROM ${raceView}
-        WHERE ${idField} = ? AND year IN (${placeholders})
+        WHERE ${idField} = ?
+          AND includes_legacy_indy500 = ?
+          AND year IN (${placeholders})
         ORDER BY year, round
       `,
-      [selectedRow.entity_id, ...selectedYears],
+      [selectedRow.entity_id, selectedScope, ...selectedYears],
     );
     setRaceRows(rows);
-  }, [db, isConstructorMode, selectedRow?.entity_id, selectedRow?.key]);
+  }, [
+    db,
+    isConstructorMode,
+    selectedRow?.entity_id,
+    selectedRow?.includes_legacy_indy500,
+    selectedRow?.key,
+  ]);
 
   const leader = scoredRows[0];
   const displayedGeneratedAt =
@@ -509,7 +553,7 @@ function App() {
             <TimingSnapshot
               leader={leader}
               rows={scoredRows}
-              seasonRows={activeSeasonRows}
+              seasonRows={scopedSeasonRows}
               constructors={constructors}
             />
             <TopChart rows={scoredRows.slice(0, 8)} constructors={constructors} />
@@ -681,6 +725,16 @@ function ModelControls({ model, onChange }) {
             onChange={(event) => update("includeIncomplete", event.target.checked)}
           />
           <span>Incomplete seasons</span>
+        </label>
+        <label className="toggle-row">
+          <input
+            type="checkbox"
+            checked={model.includeLegacyIndy500}
+            onChange={(event) =>
+              update("includeLegacyIndy500", event.target.checked)
+            }
+          />
+          <span>1950-60 Indy</span>
         </label>
         <label className="compact-input">
           <span>Min share</span>
@@ -985,11 +1039,15 @@ function SeasonDetail({ row, raceRows, model, mode, constructors }) {
   }
 
   const finishPenalty =
-    Number(model.finishWeight) * Number(row.avg_finish_harmonic_loss);
+    Number(model.finishWeight) *
+    Number(row.avg_scored_finish_harmonic_loss ?? row.avg_finish_harmonic_loss);
   const qualifyingLoss =
     model.qualifyingSource === "grid"
-      ? Number(row.avg_grid_harmonic_loss)
-      : Number(row.avg_qualifying_harmonic_loss);
+      ? Number(row.avg_scored_grid_harmonic_loss ?? row.avg_grid_harmonic_loss)
+      : Number(
+          row.avg_scored_qualifying_harmonic_loss ??
+            row.avg_qualifying_harmonic_loss,
+        );
   const qualifyingPenalty = Number(model.qualifyingWeight) * qualifyingLoss;
   const traceLabel = row.is_peak
     ? "Peak trace"
@@ -1029,6 +1087,10 @@ function SeasonDetail({ row, raceRows, model, mode, constructors }) {
         <div>
           <span>Race share</span>
           <strong>{formatPercent(row.race_share)}</strong>
+        </div>
+        <div>
+          <span>Missed</span>
+          <strong>{formatNumber(row.missed_completed_races || 0)}</strong>
         </div>
         <div>
           <span>Points</span>

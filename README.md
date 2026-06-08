@@ -7,11 +7,14 @@ generating driver-season dominance ratings.
 
 ```text
 score = base_rating
-      - finish_weight * avg(H(finish_position - 1))
-      - qualifying_weight * avg(H(qualifying_position - 1))
+      - finish_weight * avg_scored(H(finish_position - 1))
+      - qualifying_weight * avg_scored(H(qualifying_position - 1))
 ```
 
 `H(0)=0`, and `H(n)=1 + 1/2 + ... + 1/n`.
+Driver race share is counted by distinct Grands Prix entered. Missed completed
+races count as back-marker harmonic losses in the scored averages, so a driver
+cannot receive a perfect season score after skipping a completed race.
 
 The default parameters are:
 
@@ -35,6 +38,10 @@ data/raw/f1db-v2026.5.1/
 
 The input snapshot is F1DB release `v2026.5.1`, including the original
 `f1db-csv.zip` and `checksums_sha256.txt`.
+
+The default generated ratings include the Indianapolis 500 races that counted
+toward the World Championship from 1950 through 1960. The site bundles both
+dataset scopes and exposes a toggle to exclude those races for comparison.
 
 Generated output data is saved in:
 
@@ -70,6 +77,7 @@ scoring model:
 - `finish_weight`
 - `qualifying_weight`
 - `qualifying_source`
+- `1950-60 Indy`
 
 The default leaderboard filters are:
 
@@ -104,6 +112,9 @@ python3 scripts/build_site_db.py
 That command regenerates the default rating CSVs, mirrors all raw F1DB CSV tables
 into SQLite, imports the rating outputs, creates app-ready views and indexes, and
 copies the finished database to `site/public/f1elo.sqlite`.
+
+Pass `--exclude-legacy-indy500` to regenerate the default rating CSVs without
+the historical Indy 500 races. The site database still exposes both scopes.
 
 Run the site locally:
 
@@ -161,6 +172,12 @@ Use starting grid instead of raw qualifying position:
 
 ```bash
 python3 scripts/build_ratings.py --qualifying-source grid
+```
+
+Exclude the 1950-1960 Indianapolis 500 races from the generated rating CSVs:
+
+```bash
+python3 scripts/build_ratings.py --exclude-legacy-indy500
 ```
 
 Write an alternate tuned output directory:

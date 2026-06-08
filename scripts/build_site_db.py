@@ -79,6 +79,26 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Do not copy the finished SQLite database to the frontend public path.",
     )
+    parser.add_argument(
+        "--include-legacy-indy500",
+        action="store_true",
+        dest="include_legacy_indy500",
+        help=(
+            "Include the 1950-1960 Indianapolis 500 races in the regenerated "
+            "default rating CSVs. This is the default; the SQLite site views "
+            "always expose both scopes for the browser toggle."
+        ),
+    )
+    parser.add_argument(
+        "--exclude-legacy-indy500",
+        action="store_false",
+        dest="include_legacy_indy500",
+        help=(
+            "Exclude the 1950-1960 Indianapolis 500 races from the regenerated "
+            "default rating CSVs. The SQLite site views still expose both scopes."
+        ),
+    )
+    parser.set_defaults(include_legacy_indy500=True)
     return parser.parse_args()
 
 
@@ -288,7 +308,7 @@ def import_csv_table(
     return len(rows)
 
 
-def regenerate_ratings(input_dir: Path, output_dir: Path) -> None:
+def regenerate_ratings(input_dir: Path, output_dir: Path, include_legacy_indy500: bool) -> None:
     command = [
         sys.executable,
         str(REPO_ROOT / "scripts/build_ratings.py"),
@@ -297,12 +317,15 @@ def regenerate_ratings(input_dir: Path, output_dir: Path) -> None:
         "--output-dir",
         str(output_dir),
     ]
+    if include_legacy_indy500:
+        command.append("--include-legacy-indy500")
     subprocess.run(command, cwd=REPO_ROOT, check=True)
 
 
 def create_indexes(connection: sqlite3.Connection) -> None:
     index_statements = [
         "CREATE INDEX idx_races_year_round ON races(year, round)",
+        "CREATE INDEX idx_races_grand_prix_year ON races(grand_prix_id, year)",
         "CREATE INDEX idx_race_results_year_driver ON race_results(year, driver_id)",
         "CREATE INDEX idx_race_results_year_constructor ON race_results(year, constructor_id)",
         "CREATE INDEX idx_race_results_race ON race_results(race_id)",
@@ -319,47 +342,338 @@ def create_indexes(connection: sqlite3.Connection) -> None:
 def create_views(connection: sqlite3.Connection) -> None:
     connection.executescript(
         """
-        DROP VIEW IF EXISTS completed_seasons;
+        DROP VIEW IF EXISTS driver_season_race_results;
         DROP VIEW IF EXISTS constructor_season_race_results;
         DROP VIEW IF EXISTS leaderboard_constructor_seasons;
         DROP VIEW IF EXISTS constructor_race_peaks;
         DROP VIEW IF EXISTS constructor_car_race_results;
+        DROP VIEW IF EXISTS leaderboard_driver_seasons;
+        DROP VIEW IF EXISTS completed_seasons;
+        DROP VIEW IF EXISTS scoped_races;
+        DROP VIEW IF EXISTS legacy_indy500_races;
+        DROP VIEW IF EXISTS race_scope_variants;
+
+        CREATE VIEW race_scope_variants AS
+        SELECT 0 AS includes_legacy_indy500, 'championship_without_1950_1960_indy500' AS scope_name
+        UNION ALL
+        SELECT 1 AS includes_legacy_indy500, 'championship_with_1950_1960_indy500' AS scope_name;
+
+        CREATE VIEW legacy_indy500_races AS
+        SELECT
+          r.id AS race_id,
+          r.year
+        FROM races r
+        WHERE r.grand_prix_id = 'indianapolis'
+          AND r.year BETWEEN 1950 AND 1960;
+
+        CREATE VIEW scoped_races AS
+        SELECT
+          rsv.includes_legacy_indy500,
+          rsv.scope_name,
+          r.*,
+          CASE WHEN lir.race_id IS NOT NULL THEN 1 ELSE 0 END AS is_legacy_indy500
+        FROM race_scope_variants rsv
+        JOIN races r
+        LEFT JOIN legacy_indy500_races lir ON lir.race_id = r.id
+        WHERE rsv.includes_legacy_indy500 = 1
+           OR lir.race_id IS NULL;
 
         CREATE VIEW completed_seasons AS
         SELECT
+          rsv.includes_legacy_indy500,
           s.year,
-          COUNT(DISTINCT r.id) AS scheduled_races,
+          COUNT(DISTINCT sr.id) AS scheduled_races,
           COUNT(DISTINCT rr.race_id) AS completed_races,
           CASE
-            WHEN COUNT(DISTINCT r.id) > 0
-             AND COUNT(DISTINCT r.id) = COUNT(DISTINCT rr.race_id)
+            WHEN COUNT(DISTINCT sr.id) > 0
+             AND COUNT(DISTINCT sr.id) = COUNT(DISTINCT rr.race_id)
             THEN 1 ELSE 0
           END AS is_completed
         FROM seasons s
-        LEFT JOIN races r ON r.year = s.year
-        LEFT JOIN race_results rr ON rr.race_id = r.id
-        GROUP BY s.year;
+        CROSS JOIN race_scope_variants rsv
+        LEFT JOIN scoped_races sr
+          ON sr.year = s.year
+         AND sr.includes_legacy_indy500 = rsv.includes_legacy_indy500
+        LEFT JOIN race_results rr ON rr.race_id = sr.id
+        GROUP BY
+          rsv.includes_legacy_indy500,
+          s.year;
 
-        DROP VIEW IF EXISTS leaderboard_driver_seasons;
         CREATE VIEW leaderboard_driver_seasons AS
+        WITH RECURSIVE harmonic(n, value) AS (
+          SELECT 0, 0.0
+          UNION ALL
+          SELECT n + 1, value + (1.0 / (n + 1))
+          FROM harmonic
+          WHERE n < 200
+        ),
+        field_sizes AS (
+          SELECT
+            sr.includes_legacy_indy500,
+            rr.race_id,
+            COUNT(*) AS field_size
+          FROM scoped_races sr
+          JOIN race_results rr ON rr.race_id = sr.id
+          GROUP BY
+            sr.includes_legacy_indy500,
+            rr.race_id
+        ),
+        driver_race_losses AS (
+          SELECT
+            sr.includes_legacy_indy500,
+            sr.is_legacy_indy500,
+            rr.year,
+            rr.round,
+            rr.race_id,
+            rr.driver_id,
+            rr.constructor_id,
+            fs.field_size,
+            CASE
+              WHEN rr.position_display_order IS NOT NULL
+               AND rr.position_display_order > 0
+              THEN rr.position_display_order
+              ELSE fs.field_size + 1
+            END AS normalized_finish_position,
+            CASE
+              WHEN rr.qualification_position_number IS NOT NULL
+               AND rr.qualification_position_number > 0
+              THEN rr.qualification_position_number
+              WHEN rr.grid_position_number IS NOT NULL
+               AND rr.grid_position_number > 0
+              THEN rr.grid_position_number
+              ELSE fs.field_size + 1
+            END AS normalized_qualifying_position,
+            CASE
+              WHEN rr.grid_position_number IS NOT NULL
+               AND rr.grid_position_number > 0
+              THEN rr.grid_position_number
+              ELSE fs.field_size + 1
+            END AS normalized_grid_position,
+            COALESCE(rr.points, 0) AS points
+          FROM scoped_races sr
+          JOIN race_results rr ON rr.race_id = sr.id
+          JOIN field_sizes fs
+            ON fs.includes_legacy_indy500 = sr.includes_legacy_indy500
+           AND fs.race_id = rr.race_id
+        ),
+        driver_race_scores AS (
+          SELECT
+            drl.*,
+            hf.value AS finish_harmonic_loss,
+            hq.value AS qualifying_harmonic_loss,
+            hg.value AS grid_harmonic_loss
+          FROM driver_race_losses drl
+          LEFT JOIN harmonic hf ON hf.n = drl.normalized_finish_position - 1
+          LEFT JOIN harmonic hq ON hq.n = drl.normalized_qualifying_position - 1
+          LEFT JOIN harmonic hg ON hg.n = drl.normalized_grid_position - 1
+        ),
+        driver_race_entries AS (
+          SELECT
+            includes_legacy_indy500,
+            year,
+            round,
+            race_id,
+            driver_id,
+            REPLACE(GROUP_CONCAT(DISTINCT constructor_id), ',', '/') AS constructors,
+            MIN(normalized_finish_position) AS normalized_finish_position,
+            MIN(normalized_qualifying_position) AS normalized_qualifying_position,
+            MIN(normalized_grid_position) AS normalized_grid_position,
+            MIN(finish_harmonic_loss) AS finish_harmonic_loss,
+            MIN(qualifying_harmonic_loss) AS qualifying_harmonic_loss,
+            MIN(grid_harmonic_loss) AS grid_harmonic_loss,
+            SUM(points) AS points
+          FROM driver_race_scores
+          GROUP BY
+            includes_legacy_indy500,
+            year,
+            round,
+            race_id,
+            driver_id
+        ),
+        completed_race_losses AS (
+          SELECT
+            sr.includes_legacy_indy500,
+            sr.year,
+            sr.id AS race_id,
+            h.value AS missed_harmonic_loss
+          FROM scoped_races sr
+          JOIN field_sizes fs
+            ON fs.includes_legacy_indy500 = sr.includes_legacy_indy500
+           AND fs.race_id = sr.id
+          LEFT JOIN harmonic h ON h.n = fs.field_size
+        ),
+        driver_seasons AS (
+          SELECT
+            dre.includes_legacy_indy500,
+            dre.year,
+            dre.driver_id,
+            d.name AS driver_name,
+            REPLACE(GROUP_CONCAT(DISTINCT dre.constructors), ',', '/') AS constructors,
+            COALESCE(cs.scheduled_races, 0) AS scheduled_races,
+            COALESCE(cs.completed_races, 0) AS completed_races,
+            COUNT(*) AS entries,
+            CASE
+              WHEN COALESCE(cs.scheduled_races, 0) > 0
+              THEN CAST(COUNT(*) AS REAL) / cs.scheduled_races
+              ELSE 0.0
+            END AS race_share,
+            SUM(CASE WHEN dre.normalized_finish_position = 1 THEN 1 ELSE 0 END) AS wins,
+            SUM(CASE WHEN dre.normalized_finish_position <= 3 THEN 1 ELSE 0 END) AS podiums,
+            SUM(CASE WHEN dre.normalized_qualifying_position = 1 THEN 1 ELSE 0 END) AS poles,
+            SUM(CASE WHEN dre.normalized_grid_position = 1 THEN 1 ELSE 0 END) AS grid_poles,
+            SUM(dre.points) AS points,
+            AVG(dre.finish_harmonic_loss) AS avg_finish_harmonic_loss,
+            AVG(dre.qualifying_harmonic_loss) AS avg_qualifying_harmonic_loss,
+            AVG(dre.grid_harmonic_loss) AS avg_grid_harmonic_loss,
+            SUM(dre.finish_harmonic_loss) AS finish_loss_sum,
+            SUM(dre.qualifying_harmonic_loss) AS qualifying_loss_sum,
+            SUM(dre.grid_harmonic_loss) AS grid_loss_sum,
+            CASE
+              WHEN COALESCE(cs.scheduled_races, 0) > 0
+               AND cs.completed_races = cs.scheduled_races
+              THEN 1 ELSE 0
+            END AS is_completed_season
+          FROM driver_race_entries dre
+          LEFT JOIN drivers d ON d.id = dre.driver_id
+          LEFT JOIN completed_seasons cs
+            ON cs.includes_legacy_indy500 = dre.includes_legacy_indy500
+           AND cs.year = dre.year
+          GROUP BY
+            dre.includes_legacy_indy500,
+            dre.year,
+            dre.driver_id,
+            d.name,
+            cs.scheduled_races,
+            cs.completed_races
+        ),
+        driver_missed_races AS (
+          SELECT
+            ds.includes_legacy_indy500,
+            ds.year,
+            ds.driver_id,
+            COUNT(crl.race_id) AS missed_completed_races,
+            COALESCE(SUM(crl.missed_harmonic_loss), 0.0) AS missed_finish_loss_sum,
+            COALESCE(SUM(crl.missed_harmonic_loss), 0.0) AS missed_qualifying_loss_sum,
+            COALESCE(SUM(crl.missed_harmonic_loss), 0.0) AS missed_grid_loss_sum
+          FROM driver_seasons ds
+          LEFT JOIN completed_race_losses crl
+            ON crl.includes_legacy_indy500 = ds.includes_legacy_indy500
+           AND crl.year = ds.year
+          LEFT JOIN driver_race_entries dre
+            ON dre.includes_legacy_indy500 = ds.includes_legacy_indy500
+           AND dre.year = ds.year
+           AND dre.driver_id = ds.driver_id
+           AND dre.race_id = crl.race_id
+          WHERE dre.race_id IS NULL
+          GROUP BY
+            ds.includes_legacy_indy500,
+            ds.year,
+            ds.driver_id
+        ),
+        scored_driver_seasons AS (
+          SELECT
+            ds.*,
+            COALESCE(dmr.missed_completed_races, 0) AS missed_completed_races,
+            COALESCE(dmr.missed_finish_loss_sum, 0.0) AS missed_finish_loss_sum,
+            COALESCE(dmr.missed_qualifying_loss_sum, 0.0) AS missed_qualifying_loss_sum,
+            COALESCE(dmr.missed_grid_loss_sum, 0.0) AS missed_grid_loss_sum,
+            CASE
+              WHEN MAX(ds.completed_races, ds.entries, 1) > 0
+              THEN (ds.finish_loss_sum + COALESCE(dmr.missed_finish_loss_sum, 0.0))
+                / MAX(ds.completed_races, ds.entries, 1)
+              ELSE 0.0
+            END AS avg_scored_finish_harmonic_loss,
+            CASE
+              WHEN MAX(ds.completed_races, ds.entries, 1) > 0
+              THEN (ds.qualifying_loss_sum + COALESCE(dmr.missed_qualifying_loss_sum, 0.0))
+                / MAX(ds.completed_races, ds.entries, 1)
+              ELSE 0.0
+            END AS avg_scored_qualifying_harmonic_loss,
+            CASE
+              WHEN MAX(ds.completed_races, ds.entries, 1) > 0
+              THEN (ds.grid_loss_sum + COALESCE(dmr.missed_grid_loss_sum, 0.0))
+                / MAX(ds.completed_races, ds.entries, 1)
+              ELSE 0.0
+            END AS avg_scored_grid_harmonic_loss,
+            3000.0
+              - 225.0 * (
+                (ds.finish_loss_sum + COALESCE(dmr.missed_finish_loss_sum, 0.0))
+                / MAX(ds.completed_races, ds.entries, 1)
+              )
+              - 75.0 * (
+                (ds.qualifying_loss_sum + COALESCE(dmr.missed_qualifying_loss_sum, 0.0))
+                / MAX(ds.completed_races, ds.entries, 1)
+              ) AS score,
+            CASE WHEN ds.entries > 0 THEN CAST(ds.wins AS REAL) / ds.entries ELSE 0.0 END AS win_rate,
+            CASE WHEN ds.entries > 0 THEN CAST(ds.podiums AS REAL) / ds.entries ELSE 0.0 END AS podium_rate,
+            CASE WHEN ds.entries > 0 THEN CAST(ds.poles AS REAL) / ds.entries ELSE 0.0 END AS pole_rate,
+            CASE
+              WHEN ds.race_share >= 0.75
+               AND ds.entries >= 4
+              THEN 1 ELSE 0
+            END AS is_default_qualified
+          FROM driver_seasons ds
+          LEFT JOIN driver_missed_races dmr
+            ON dmr.includes_legacy_indy500 = ds.includes_legacy_indy500
+           AND dmr.year = ds.year
+           AND dmr.driver_id = ds.driver_id
+        ),
+        ranked_driver_seasons AS (
+          SELECT
+            sds.*,
+            ROW_NUMBER() OVER (
+              PARTITION BY includes_legacy_indy500, year
+              ORDER BY score DESC, driver_name
+            ) AS season_rank,
+            ROW_NUMBER() OVER (
+              PARTITION BY includes_legacy_indy500
+              ORDER BY score DESC, year, driver_name
+            ) AS overall_rank
+          FROM scored_driver_seasons sds
+        )
         SELECT
-          dsr.*,
-          CASE
-            WHEN dsr.scheduled_races > 0
-             AND dsr.completed_races = dsr.scheduled_races
-            THEN 1 ELSE 0
-          END AS is_completed_season,
-          CASE
-            WHEN dsr.race_share >= 0.75
-             AND dsr.entries >= 4
-            THEN 1 ELSE 0
-          END AS is_default_qualified
-        FROM driver_season_ratings dsr;
+          year,
+          season_rank,
+          overall_rank,
+          driver_id,
+          driver_name,
+          constructors,
+          score,
+          scheduled_races,
+          completed_races,
+          entries,
+          race_share,
+          missed_completed_races,
+          wins,
+          win_rate,
+          podiums,
+          podium_rate,
+          poles,
+          pole_rate,
+          grid_poles,
+          points,
+          avg_finish_harmonic_loss,
+          avg_qualifying_harmonic_loss,
+          avg_grid_harmonic_loss,
+          avg_scored_finish_harmonic_loss,
+          avg_scored_qualifying_harmonic_loss,
+          avg_scored_grid_harmonic_loss,
+          finish_loss_sum,
+          qualifying_loss_sum,
+          grid_loss_sum,
+          missed_finish_loss_sum,
+          missed_qualifying_loss_sum,
+          missed_grid_loss_sum,
+          is_completed_season,
+          is_default_qualified,
+          includes_legacy_indy500
+        FROM ranked_driver_seasons;
 
-        DROP VIEW IF EXISTS constructor_car_race_results;
         CREATE VIEW constructor_car_race_results AS
         WITH grouped_cars AS (
           SELECT
+            sr.includes_legacy_indy500,
+            sr.is_legacy_indy500,
             rr.year,
             rr.round,
             rr.race_id,
@@ -407,11 +721,14 @@ def create_views(connection: sqlite3.Connection) -> None:
             MAX(CASE WHEN rr.fastest_lap = 1 THEN 1 ELSE 0 END) AS fastest_lap,
             MAX(CASE WHEN rr.driver_of_the_day = 1 THEN 1 ELSE 0 END) AS driver_of_the_day,
             MAX(CASE WHEN rr.grand_slam = 1 THEN 1 ELSE 0 END) AS grand_slam
-          FROM race_results rr
+          FROM scoped_races sr
+          JOIN race_results rr ON rr.race_id = sr.id
           LEFT JOIN drivers d ON d.id = rr.driver_id
           WHERE rr.constructor_id IS NOT NULL
             AND rr.constructor_id <> ''
           GROUP BY
+            sr.includes_legacy_indy500,
+            sr.is_legacy_indy500,
             rr.year,
             rr.round,
             rr.race_id,
@@ -422,7 +739,7 @@ def create_views(connection: sqlite3.Connection) -> None:
           SELECT
             grouped_cars.*,
             ROW_NUMBER() OVER (
-              PARTITION BY race_id
+              PARTITION BY includes_legacy_indy500, race_id
               ORDER BY
                 COALESCE(display_order_sort, 9999),
                 constructor_id,
@@ -431,6 +748,8 @@ def create_views(connection: sqlite3.Connection) -> None:
           FROM grouped_cars
         )
         SELECT
+          includes_legacy_indy500,
+          is_legacy_indy500,
           year,
           round,
           race_id,
@@ -457,10 +776,13 @@ def create_views(connection: sqlite3.Connection) -> None:
         CREATE VIEW constructor_race_peaks AS
         WITH car_field_sizes AS (
           SELECT
+            includes_legacy_indy500,
             race_id,
             COUNT(*) AS field_size
           FROM constructor_car_race_results
-          GROUP BY race_id
+          GROUP BY
+            includes_legacy_indy500,
+            race_id
         ),
         scored_cars AS (
           SELECT
@@ -488,27 +810,29 @@ def create_views(connection: sqlite3.Connection) -> None:
               ELSE cfs.field_size + 1
             END AS normalized_grid_position
           FROM constructor_car_race_results ccrr
-          JOIN car_field_sizes cfs ON cfs.race_id = ccrr.race_id
+          JOIN car_field_sizes cfs
+            ON cfs.includes_legacy_indy500 = ccrr.includes_legacy_indy500
+           AND cfs.race_id = ccrr.race_id
         ),
         ranked_cars AS (
           SELECT
             scored_cars.*,
             ROW_NUMBER() OVER (
-              PARTITION BY race_id, constructor_id
+              PARTITION BY includes_legacy_indy500, race_id, constructor_id
               ORDER BY
                 normalized_finish_position,
                 display_position,
                 driver_number
             ) AS finish_rank,
             ROW_NUMBER() OVER (
-              PARTITION BY race_id, constructor_id
+              PARTITION BY includes_legacy_indy500, race_id, constructor_id
               ORDER BY
                 normalized_qualifying_position,
                 display_position,
                 driver_number
             ) AS qualifying_rank,
             ROW_NUMBER() OVER (
-              PARTITION BY race_id, constructor_id
+              PARTITION BY includes_legacy_indy500, race_id, constructor_id
               ORDER BY
                 normalized_grid_position,
                 display_position,
@@ -517,6 +841,8 @@ def create_views(connection: sqlite3.Connection) -> None:
           FROM scored_cars
         )
         SELECT
+          includes_legacy_indy500,
+          is_legacy_indy500,
           year,
           round,
           race_id,
@@ -546,6 +872,8 @@ def create_views(connection: sqlite3.Connection) -> None:
           MAX(grand_slam) AS grand_slam
         FROM ranked_cars
         GROUP BY
+          includes_legacy_indy500,
+          is_legacy_indy500,
           year,
           round,
           race_id,
@@ -561,6 +889,16 @@ def create_views(connection: sqlite3.Connection) -> None:
           FROM harmonic
           WHERE n < 200
         ),
+        car_field_sizes AS (
+          SELECT
+            includes_legacy_indy500,
+            race_id,
+            COUNT(*) AS field_size
+          FROM constructor_car_race_results
+          GROUP BY
+            includes_legacy_indy500,
+            race_id
+        ),
         race_losses AS (
           SELECT
             crp.*,
@@ -571,56 +909,154 @@ def create_views(connection: sqlite3.Connection) -> None:
           LEFT JOIN harmonic hf ON hf.n = crp.best_finish_position - 1
           LEFT JOIN harmonic hq ON hq.n = crp.best_qualifying_position - 1
           LEFT JOIN harmonic hg ON hg.n = crp.best_grid_position - 1
+        ),
+        completed_race_losses AS (
+          SELECT
+            cfs.includes_legacy_indy500,
+            ccrr.year,
+            cfs.race_id,
+            h.value AS missed_harmonic_loss
+          FROM car_field_sizes cfs
+          JOIN constructor_car_race_results ccrr
+            ON ccrr.includes_legacy_indy500 = cfs.includes_legacy_indy500
+           AND ccrr.race_id = cfs.race_id
+          LEFT JOIN harmonic h ON h.n = cfs.field_size
+          GROUP BY
+            cfs.includes_legacy_indy500,
+            ccrr.year,
+            cfs.race_id,
+            h.value
+        ),
+        constructor_seasons AS (
+          SELECT
+            rl.includes_legacy_indy500,
+            rl.year,
+            rl.constructor_id,
+            c.name AS constructor_name,
+            COALESCE(cs.scheduled_races, 0) AS scheduled_races,
+            COALESCE(cs.completed_races, 0) AS completed_races,
+            COUNT(*) AS entries,
+            SUM(rl.car_entries) AS car_entries,
+            CASE
+              WHEN COALESCE(cs.scheduled_races, 0) > 0
+              THEN CAST(COUNT(*) AS REAL) / cs.scheduled_races
+              ELSE 0.0
+            END AS race_share,
+            SUM(rl.wins) AS wins,
+            SUM(rl.podiums) AS podiums,
+            SUM(rl.podiumed_race) AS podiumed_races,
+            SUM(rl.poles) AS poles,
+            SUM(rl.grid_poles) AS grid_poles,
+            SUM(rl.points) AS points,
+            AVG(rl.finish_harmonic_loss) AS avg_finish_harmonic_loss,
+            AVG(rl.qualifying_harmonic_loss) AS avg_qualifying_harmonic_loss,
+            AVG(rl.grid_harmonic_loss) AS avg_grid_harmonic_loss,
+            SUM(rl.finish_harmonic_loss) AS finish_loss_sum,
+            SUM(rl.qualifying_harmonic_loss) AS qualifying_loss_sum,
+            SUM(rl.grid_harmonic_loss) AS grid_loss_sum,
+            CASE
+              WHEN COALESCE(cs.scheduled_races, 0) > 0
+               AND cs.completed_races = cs.scheduled_races
+              THEN 1 ELSE 0
+            END AS is_completed_season
+          FROM race_losses rl
+          LEFT JOIN constructors c ON c.id = rl.constructor_id
+          LEFT JOIN completed_seasons cs
+            ON cs.includes_legacy_indy500 = rl.includes_legacy_indy500
+           AND cs.year = rl.year
+          GROUP BY
+            rl.includes_legacy_indy500,
+            rl.year,
+            rl.constructor_id,
+            c.name,
+            cs.scheduled_races,
+            cs.completed_races
+        ),
+        constructor_missed_races AS (
+          SELECT
+            cs.includes_legacy_indy500,
+            cs.year,
+            cs.constructor_id,
+            COUNT(crl.race_id) AS missed_completed_races,
+            COALESCE(SUM(crl.missed_harmonic_loss), 0.0) AS missed_finish_loss_sum,
+            COALESCE(SUM(crl.missed_harmonic_loss), 0.0) AS missed_qualifying_loss_sum,
+            COALESCE(SUM(crl.missed_harmonic_loss), 0.0) AS missed_grid_loss_sum
+          FROM constructor_seasons cs
+          LEFT JOIN completed_race_losses crl
+            ON crl.includes_legacy_indy500 = cs.includes_legacy_indy500
+           AND crl.year = cs.year
+          LEFT JOIN constructor_race_peaks crp
+            ON crp.includes_legacy_indy500 = cs.includes_legacy_indy500
+           AND crp.year = cs.year
+           AND crp.constructor_id = cs.constructor_id
+           AND crp.race_id = crl.race_id
+          WHERE crp.race_id IS NULL
+          GROUP BY
+            cs.includes_legacy_indy500,
+            cs.year,
+            cs.constructor_id
+        ),
+        scored_constructor_seasons AS (
+          SELECT
+            cs.*,
+            COALESCE(cmr.missed_completed_races, 0) AS missed_completed_races,
+            COALESCE(cmr.missed_finish_loss_sum, 0.0) AS missed_finish_loss_sum,
+            COALESCE(cmr.missed_qualifying_loss_sum, 0.0) AS missed_qualifying_loss_sum,
+            COALESCE(cmr.missed_grid_loss_sum, 0.0) AS missed_grid_loss_sum,
+            CASE
+              WHEN MAX(cs.completed_races, cs.entries, 1) > 0
+              THEN (cs.finish_loss_sum + COALESCE(cmr.missed_finish_loss_sum, 0.0))
+                / MAX(cs.completed_races, cs.entries, 1)
+              ELSE 0.0
+            END AS avg_scored_finish_harmonic_loss,
+            CASE
+              WHEN MAX(cs.completed_races, cs.entries, 1) > 0
+              THEN (cs.qualifying_loss_sum + COALESCE(cmr.missed_qualifying_loss_sum, 0.0))
+                / MAX(cs.completed_races, cs.entries, 1)
+              ELSE 0.0
+            END AS avg_scored_qualifying_harmonic_loss,
+            CASE
+              WHEN MAX(cs.completed_races, cs.entries, 1) > 0
+              THEN (cs.grid_loss_sum + COALESCE(cmr.missed_grid_loss_sum, 0.0))
+                / MAX(cs.completed_races, cs.entries, 1)
+              ELSE 0.0
+            END AS avg_scored_grid_harmonic_loss,
+            3000.0
+              - 225.0 * (
+                (cs.finish_loss_sum + COALESCE(cmr.missed_finish_loss_sum, 0.0))
+                / MAX(cs.completed_races, cs.entries, 1)
+              )
+              - 75.0 * (
+                (cs.qualifying_loss_sum + COALESCE(cmr.missed_qualifying_loss_sum, 0.0))
+                / MAX(cs.completed_races, cs.entries, 1)
+              ) AS score,
+            CASE
+              WHEN cs.race_share >= 0.75
+               AND cs.entries >= 4
+              THEN 1 ELSE 0
+            END AS is_default_qualified
+          FROM constructor_seasons cs
+          LEFT JOIN constructor_missed_races cmr
+            ON cmr.includes_legacy_indy500 = cs.includes_legacy_indy500
+           AND cmr.year = cs.year
+           AND cmr.constructor_id = cs.constructor_id
         )
         SELECT
-          rl.year,
-          rl.constructor_id,
-          c.name AS constructor_name,
-          COALESCE(cs.scheduled_races, 0) AS scheduled_races,
-          COALESCE(cs.completed_races, 0) AS completed_races,
-          COUNT(*) AS entries,
-          SUM(rl.car_entries) AS car_entries,
-          CASE
-            WHEN COALESCE(cs.scheduled_races, 0) > 0
-            THEN CAST(COUNT(*) AS REAL) / cs.scheduled_races
-            ELSE 0.0
-          END AS race_share,
-          SUM(rl.wins) AS wins,
-          SUM(rl.podiums) AS podiums,
-          SUM(rl.podiumed_race) AS podiumed_races,
-          SUM(rl.poles) AS poles,
-          SUM(rl.grid_poles) AS grid_poles,
-          SUM(rl.points) AS points,
-          AVG(rl.finish_harmonic_loss) AS avg_finish_harmonic_loss,
-          AVG(rl.qualifying_harmonic_loss) AS avg_qualifying_harmonic_loss,
-          AVG(rl.grid_harmonic_loss) AS avg_grid_harmonic_loss,
-          SUM(rl.finish_harmonic_loss) AS finish_loss_sum,
-          SUM(rl.qualifying_harmonic_loss) AS qualifying_loss_sum,
-          SUM(rl.grid_harmonic_loss) AS grid_loss_sum,
-          CASE
-            WHEN COALESCE(cs.scheduled_races, 0) > 0
-             AND cs.completed_races = cs.scheduled_races
-            THEN 1 ELSE 0
-          END AS is_completed_season,
-          CASE
-            WHEN COALESCE(cs.scheduled_races, 0) > 0
-             AND CAST(COUNT(*) AS REAL) / cs.scheduled_races >= 0.75
-             AND COUNT(*) >= 4
-            THEN 1 ELSE 0
-          END AS is_default_qualified
-        FROM race_losses rl
-        LEFT JOIN constructors c ON c.id = rl.constructor_id
-        LEFT JOIN completed_seasons cs ON cs.year = rl.year
-        GROUP BY
-          rl.year,
-          rl.constructor_id,
-          c.name,
-          cs.scheduled_races,
-          cs.completed_races;
+          scs.*,
+          ROW_NUMBER() OVER (
+            PARTITION BY includes_legacy_indy500, year
+            ORDER BY score DESC, constructor_name
+          ) AS season_rank,
+          ROW_NUMBER() OVER (
+            PARTITION BY includes_legacy_indy500
+            ORDER BY score DESC, year, constructor_name
+          ) AS overall_rank
+        FROM scored_constructor_seasons scs;
 
-        DROP VIEW IF EXISTS constructor_season_race_results;
         CREATE VIEW constructor_season_race_results AS
         SELECT
+          crp.includes_legacy_indy500,
+          crp.is_legacy_indy500,
           crp.year,
           crp.round,
           crp.race_id,
@@ -659,9 +1095,10 @@ def create_views(connection: sqlite3.Connection) -> None:
         LEFT JOIN constructors c ON c.id = crp.constructor_id
         LEFT JOIN circuits ci ON ci.id = r.circuit_id;
 
-        DROP VIEW IF EXISTS driver_season_race_results;
         CREATE VIEW driver_season_race_results AS
         SELECT
+          sr.includes_legacy_indy500,
+          sr.is_legacy_indy500,
           rr.year,
           rr.round,
           rr.race_id,
@@ -691,7 +1128,8 @@ def create_views(connection: sqlite3.Connection) -> None:
           rr.fastest_lap,
           rr.driver_of_the_day,
           rr.grand_slam
-        FROM race_results rr
+        FROM scoped_races sr
+        JOIN race_results rr ON rr.race_id = sr.id
         LEFT JOIN races r ON r.id = rr.race_id
         LEFT JOIN grands_prix gp ON gp.id = r.grand_prix_id
         LEFT JOIN drivers d ON d.id = rr.driver_id
@@ -718,7 +1156,7 @@ def build_database(args: argparse.Namespace) -> None:
         raise FileNotFoundError(f"Missing input directory: {input_dir}")
 
     if not args.skip_ratings:
-        regenerate_ratings(input_dir, output_dir)
+        regenerate_ratings(input_dir, output_dir, args.include_legacy_indy500)
 
     raw_csvs = sorted(input_dir.glob("f1db-*.csv"))
     if not raw_csvs:
@@ -754,6 +1192,7 @@ def build_database(args: argparse.Namespace) -> None:
         import_rating_metadata(connection, output_dir)
         insert_metadata(connection, "generated_at", datetime.now(timezone.utc).isoformat())
         insert_metadata(connection, "f1db_snapshot", input_dir.name)
+        insert_metadata(connection, "default_include_legacy_indy500", args.include_legacy_indy500)
         insert_metadata(connection, "raw_table_count", len(raw_counts))
         insert_metadata(connection, "rating_table_count", len(rating_counts))
         insert_metadata(connection, "raw_row_counts", raw_counts)
