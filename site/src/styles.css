@@ -503,7 +503,7 @@ input[type="range"] {
   font-weight: 800;
 }
 
-.driver-pick {
+.entity-pick {
   max-width: 210px;
   overflow: hidden;
   border: 0;
@@ -621,6 +621,10 @@ input[type="range"] {
   background: var(--track-2);
 }
 
+.constructor-race-row {
+  grid-template-columns: 44px minmax(0, 1fr) minmax(168px, 196px);
+}
+
 .race-round {
   display: flex;
   align-items: center;
@@ -658,11 +662,19 @@ input[type="range"] {
   text-align: center;
 }
 
+.constructor-race-result {
+  grid-template-columns: 1fr 1fr;
+  text-align: left;
+}
+
 .race-result span,
 .race-result strong {
+  overflow: hidden;
   border-radius: 4px;
   padding: 5px 3px;
   background: rgba(255, 255, 255, 0.055);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .race-result strong {

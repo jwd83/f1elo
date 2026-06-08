@@ -12,6 +12,7 @@ import {
 import { loadDatabase, queryRows } from "./db.js";
 
 const DEFAULT_MODEL = {
+  mode: "driver",
   baseRating: 3000,
   finishWeight: 225,
   qualifyingWeight: 0,
@@ -74,8 +75,9 @@ function modelScore(row, model) {
   );
 }
 
-function rowKey(row) {
-  return `${row.year}:${row.driver_id}`;
+function rowKey(row, mode) {
+  const entityId = mode === "constructor" ? row.constructor_id : row.driver_id;
+  return `${mode}:${row.year}:${entityId}`;
 }
 
 function constructorNames(value, constructors) {
@@ -138,7 +140,7 @@ function compareSeasonRows(a, b) {
   if (a.year !== b.year) {
     return toNumber(a.year) - toNumber(b.year);
   }
-  return String(a.driver_name).localeCompare(String(b.driver_name));
+  return String(a.entity_name).localeCompare(String(b.entity_name));
 }
 
 function comparePeakRows(a, b) {
@@ -151,28 +153,67 @@ function comparePeakRows(a, b) {
   if (a.earliest_year !== b.earliest_year) {
     return a.earliest_year - b.earliest_year;
   }
-  return String(a.driver_name).localeCompare(String(b.driver_name));
+  return String(a.entity_name).localeCompare(String(b.entity_name));
+}
+
+function normalizeSeasonRow(row, mode, constructors, model) {
+  if (mode === "constructor") {
+    const constructorName =
+      row.constructor_name || constructors.get(row.constructor_id) || titleize(row.constructor_id);
+
+    return {
+      ...row,
+      entity_type: "constructor",
+      entity_id: row.constructor_id,
+      entity_name: constructorName,
+      key: rowKey(row, "constructor"),
+      season_label: String(row.year),
+      selected_years: [toNumber(row.year)],
+      season_rows: [row],
+      is_peak: false,
+      constructors: row.constructor_id,
+      constructor_names: constructorName,
+      computed_score: modelScore(row, model),
+      active_poles: activePoleCount(row, model),
+    };
+  }
+
+  return {
+    ...row,
+    entity_type: "driver",
+    entity_id: row.driver_id,
+    entity_name: row.driver_name,
+    key: rowKey(row, "driver"),
+    season_label: String(row.year),
+    selected_years: [toNumber(row.year)],
+    season_rows: [row],
+    is_peak: false,
+    constructor_names: constructorNames(row.constructors, constructors),
+    active_poles: activePoleCount(row, model),
+    computed_score: modelScore(row, model),
+  };
 }
 
 function buildPeakRows(rows, model, constructors, peakSize) {
-  const byDriver = new Map();
+  const byEntity = new Map();
 
   rows.forEach((row) => {
-    if (!byDriver.has(row.driver_id)) {
-      byDriver.set(row.driver_id, []);
+    if (!byEntity.has(row.entity_id)) {
+      byEntity.set(row.entity_id, []);
     }
-    byDriver.get(row.driver_id).push(row);
+    byEntity.get(row.entity_id).push(row);
   });
 
-  return Array.from(byDriver.values())
-    .filter((driverRows) => driverRows.length >= peakSize)
-    .map((driverRows) => {
-      const selectedByScore = [...driverRows]
+  return Array.from(byEntity.values())
+    .filter((entityRows) => entityRows.length >= peakSize)
+    .map((entityRows) => {
+      const selectedByScore = [...entityRows]
         .sort(compareSeasonRows)
         .slice(0, peakSize);
       const selectedChronological = [...selectedByScore].sort(
         (a, b) => toNumber(a.year) - toNumber(b.year),
       );
+      const firstRow = selectedChronological[0];
       const selectedYears = selectedChronological.map((row) => toNumber(row.year));
       const constructorIdList = uniqueChronologicalConstructorIds(selectedChronological);
       const entries = sum(selectedChronological, "entries");
@@ -190,9 +231,14 @@ function buildPeakRows(rows, model, constructors, peakSize) {
       );
 
       return {
-        driver_id: selectedChronological[0].driver_id,
-        driver_name: selectedChronological[0].driver_name,
-        key: `peak:${peakSize}:${selectedChronological[0].driver_id}`,
+        entity_type: firstRow.entity_type,
+        entity_id: firstRow.entity_id,
+        entity_name: firstRow.entity_name,
+        driver_id: firstRow.driver_id,
+        driver_name: firstRow.driver_name,
+        constructor_id: firstRow.constructor_id,
+        constructor_name: firstRow.constructor_name,
+        key: `${firstRow.entity_type}:peak:${peakSize}:${firstRow.entity_id}`,
         year: `(${selectedYears.join(", ")})`,
         season_label: `(${selectedYears.join(", ")})`,
         selected_years: selectedYears,
@@ -206,9 +252,11 @@ function buildPeakRows(rows, model, constructors, peakSize) {
         scheduled_races: scheduledRaces,
         completed_races: completedRaces,
         entries,
+        car_entries: sum(selectedChronological, "car_entries"),
         race_share: scheduledRaces > 0 ? entries / scheduledRaces : 0,
         wins: sum(selectedChronological, "wins"),
         podiums: sum(selectedChronological, "podiums"),
+        podiumed_races: sum(selectedChronological, "podiumed_races"),
         poles: sum(selectedChronological, "poles"),
         grid_poles: sum(selectedChronological, "grid_poles"),
         active_poles: activePoles,
@@ -231,7 +279,9 @@ function rowMatchesSearch(row, normalizedSearch) {
   }
 
   return [
+    row.entity_name,
     row.driver_name,
+    row.constructor_name,
     row.year,
     row.season_label,
     row.constructors,
@@ -243,17 +293,44 @@ function rowMatchesSearch(row, normalizedSearch) {
     .includes(normalizedSearch);
 }
 
+function leaderboardTitle(mode, isMultiSeason) {
+  if (mode === "constructor") {
+    return isMultiSeason ? "Peak Constructors" : "Constructor Seasons";
+  }
+  return isMultiSeason ? "Peak Drivers" : "Peak Seasons";
+}
+
+function eligibleLabel(mode, isMultiSeason) {
+  if (mode === "constructor") {
+    return isMultiSeason ? "constructors" : "constructor seasons";
+  }
+  return isMultiSeason ? "drivers" : "seasons";
+}
+
+function positionDisplay(position, text) {
+  if (text !== null && text !== undefined && text !== "") {
+    return text;
+  }
+  return formatNumber(position);
+}
+
+function placementLabel(prefix, position, text, drivers = "") {
+  const driverSuffix = drivers ? ` ${drivers}` : "";
+  return `${prefix}${positionDisplay(position, text)}${driverSuffix}`;
+}
+
 function App() {
   const [db, setDb] = useState(null);
   const [status, setStatus] = useState("Loading SQLite data");
   const [error, setError] = useState("");
-  const [seasonRows, setSeasonRows] = useState([]);
+  const [driverSeasonRows, setDriverSeasonRows] = useState([]);
+  const [constructorSeasonRows, setConstructorSeasonRows] = useState([]);
   const [constructors, setConstructors] = useState(new Map());
   const [metadata, setMetadata] = useState({});
   const [model, setModel] = useState(DEFAULT_MODEL);
   const [search, setSearch] = useState("");
   const [selectedKey, setSelectedKey] = useState("");
-  const [selectedDriverId, setSelectedDriverId] = useState("");
+  const [selectedEntityId, setSelectedEntityId] = useState("");
   const [raceRows, setRaceRows] = useState([]);
 
   useEffect(() => {
@@ -265,6 +342,10 @@ function App() {
         const leaderboard = queryRows(
           loadedDb,
           "SELECT * FROM leaderboard_driver_seasons",
+        );
+        const constructorLeaderboard = queryRows(
+          loadedDb,
+          "SELECT * FROM leaderboard_constructor_seasons",
         );
         const constructorRows = queryRows(
           loadedDb,
@@ -278,7 +359,8 @@ function App() {
         }
 
         setDb(loadedDb);
-        setSeasonRows(leaderboard);
+        setDriverSeasonRows(leaderboard);
+        setConstructorSeasonRows(constructorLeaderboard);
         setConstructors(
           new Map(constructorRows.map((row) => [row.id, row.name])),
         );
@@ -304,21 +386,15 @@ function App() {
     Math.min(MULTI_SEASON_PEAK_MAX, toNumber(model.multiSeasonPeak)),
   );
   const isMultiSeason = peakSize >= 2;
+  const isConstructorMode = model.mode === "constructor";
+  const activeSeasonRows = isConstructorMode
+    ? constructorSeasonRows
+    : driverSeasonRows;
 
   const scoredRows = useMemo(() => {
     const normalizedSearch = search.trim().toLowerCase();
-    const eligibleSeasonRows = seasonRows
-      .map((row) => ({
-        ...row,
-        key: rowKey(row),
-        season_label: String(row.year),
-        selected_years: [toNumber(row.year)],
-        season_rows: [row],
-        is_peak: false,
-        computed_score: modelScore(row, model),
-        constructor_names: constructorNames(row.constructors, constructors),
-        active_poles: activePoleCount(row, model),
-      }))
+    const eligibleSeasonRows = activeSeasonRows
+      .map((row) => normalizeSeasonRow(row, model.mode, constructors, model))
       .filter((row) => model.includeIncomplete || row.is_completed_season === 1)
       .filter((row) => toNumber(row.race_share) >= toNumber(model.minRaceShare))
       .filter((row) => toNumber(row.entries) >= toNumber(model.minEntries))
@@ -333,7 +409,7 @@ function App() {
           .sort(compareSeasonRows);
 
     return rows.map((row, index) => ({ ...row, computed_rank: index + 1 }));
-  }, [constructors, isMultiSeason, model, peakSize, search, seasonRows]);
+  }, [activeSeasonRows, constructors, isMultiSeason, model, peakSize, search]);
 
   const tableRows = scoredRows.slice(0, 250);
   const selectedRow = useMemo(() => {
@@ -342,29 +418,30 @@ function App() {
     }
     return (
       scoredRows.find((row) => row.key === selectedKey) ||
-      scoredRows.find((row) => row.driver_id === selectedDriverId) ||
+      scoredRows.find((row) => row.entity_id === selectedEntityId) ||
       scoredRows[0]
     );
-  }, [scoredRows, selectedDriverId, selectedKey]);
+  }, [scoredRows, selectedEntityId, selectedKey]);
 
   useEffect(() => {
     if (!scoredRows.length) {
       setSelectedKey("");
+      setSelectedEntityId("");
       return;
     }
 
     const nextRow =
       scoredRows.find((row) => row.key === selectedKey) ||
-      scoredRows.find((row) => row.driver_id === selectedDriverId) ||
+      scoredRows.find((row) => row.entity_id === selectedEntityId) ||
       scoredRows[0];
 
     if (nextRow.key !== selectedKey) {
       setSelectedKey(nextRow.key);
     }
-    if (nextRow.driver_id !== selectedDriverId) {
-      setSelectedDriverId(nextRow.driver_id);
+    if (nextRow.entity_id !== selectedEntityId) {
+      setSelectedEntityId(nextRow.entity_id);
     }
-  }, [scoredRows, selectedDriverId, selectedKey]);
+  }, [scoredRows, selectedEntityId, selectedKey]);
 
   useEffect(() => {
     if (!db || !selectedRow) {
@@ -374,18 +451,22 @@ function App() {
 
     const selectedYears = selectedRow.selected_years || [selectedRow.year];
     const placeholders = selectedYears.map(() => "?").join(", ");
+    const raceView = isConstructorMode
+      ? "constructor_season_race_results"
+      : "driver_season_race_results";
+    const idField = isConstructorMode ? "constructor_id" : "driver_id";
     const rows = queryRows(
       db,
       `
         SELECT *
-        FROM driver_season_race_results
-        WHERE driver_id = ? AND year IN (${placeholders})
+        FROM ${raceView}
+        WHERE ${idField} = ? AND year IN (${placeholders})
         ORDER BY year, round
       `,
-      [selectedRow.driver_id, ...selectedYears],
+      [selectedRow.entity_id, ...selectedYears],
     );
     setRaceRows(rows);
-  }, [db, selectedRow?.driver_id, selectedRow?.key]);
+  }, [db, isConstructorMode, selectedRow?.entity_id, selectedRow?.key]);
 
   const leader = scoredRows[0];
   const displayedGeneratedAt =
@@ -395,7 +476,7 @@ function App() {
 
   function selectRow(row) {
     setSelectedKey(row.key);
-    setSelectedDriverId(row.driver_id);
+    setSelectedEntityId(row.entity_id);
   }
 
   return (
@@ -406,7 +487,11 @@ function App() {
             <Gauge size={26} aria-hidden="true" />
           </div>
           <div>
-            <p className="eyebrow">Driver-season dominance</p>
+            <p className="eyebrow">
+              {isConstructorMode
+                ? "Constructor peak dominance"
+                : "Driver-season dominance"}
+            </p>
             <h1>F1 Elo Lab</h1>
           </div>
         </div>
@@ -430,7 +515,7 @@ function App() {
             <TimingSnapshot
               leader={leader}
               rows={scoredRows}
-              seasonRows={seasonRows}
+              seasonRows={activeSeasonRows}
             />
             <TopChart rows={scoredRows.slice(0, 8)} />
           </section>
@@ -440,7 +525,7 @@ function App() {
               <div className="panel-toolbar">
                 <div>
                   <p className="eyebrow">Leaderboard</p>
-                  <h2>{isMultiSeason ? "Peak Drivers" : "Peak Seasons"}</h2>
+                  <h2>{leaderboardTitle(model.mode, isMultiSeason)}</h2>
                 </div>
                 <div className="search-box">
                   <Search size={16} aria-hidden="true" />
@@ -448,7 +533,11 @@ function App() {
                     aria-label="Search leaderboard"
                     value={search}
                     onChange={(event) => setSearch(event.target.value)}
-                    placeholder="Driver, year, constructor"
+                    placeholder={
+                      isConstructorMode
+                        ? "Constructor or year"
+                        : "Driver, year, constructor"
+                    }
                   />
                   {search ? (
                     <button
@@ -468,13 +557,14 @@ function App() {
                 rows={tableRows}
                 selectedKey={selectedRow?.key}
                 isMultiSeason={isMultiSeason}
+                mode={model.mode}
                 onSelect={selectRow}
               />
 
               <div className="table-footer">
                 <span>
                   {formatNumber(scoredRows.length)} eligible{" "}
-                  {isMultiSeason ? "drivers" : "seasons"}
+                  {eligibleLabel(model.mode, isMultiSeason)}
                 </span>
                 <span>showing {formatNumber(tableRows.length)}</span>
               </div>
@@ -484,6 +574,7 @@ function App() {
               row={selectedRow}
               raceRows={raceRows}
               model={model}
+              mode={model.mode}
             />
           </section>
         </>
@@ -512,6 +603,23 @@ function ModelControls({ model, onChange }) {
           aria-label="Reset model"
         >
           <RotateCcw size={17} aria-hidden="true" />
+        </button>
+      </div>
+
+      <div className="segmented-control mode-toggle" aria-label="Rating mode">
+        <button
+          className={model.mode === "driver" ? "active" : ""}
+          type="button"
+          onClick={() => update("mode", "driver")}
+        >
+          Driver
+        </button>
+        <button
+          className={model.mode === "constructor" ? "active" : ""}
+          type="button"
+          onClick={() => update("mode", "constructor")}
+        >
+          Constructor
         </button>
       </div>
 
@@ -641,7 +749,7 @@ function TimingSnapshot({ leader, rows, seasonRows }) {
       <div className="metric">
         <span>P1</span>
         <strong>
-          {leader ? `${leader.driver_name} ${leader.season_label}` : "-"}
+          {leader ? `${leader.entity_name} ${leader.season_label}` : "-"}
         </strong>
       </div>
       <div className="metric accent">
@@ -675,7 +783,7 @@ function TopChart({ rows }) {
               <div className="bar-track">
                 <div className="bar-fill" style={{ width: `${width}%` }} />
                 <strong>
-                  {row.driver_name} {row.season_label}
+                  {row.entity_name} {row.season_label}
                 </strong>
               </div>
               <span>{formatNumber(row.computed_score, 0)}</span>
@@ -687,7 +795,9 @@ function TopChart({ rows }) {
   );
 }
 
-function LeaderboardTable({ rows, selectedKey, isMultiSeason, onSelect }) {
+function LeaderboardTable({ rows, selectedKey, isMultiSeason, mode, onSelect }) {
+  const isConstructorMode = mode === "constructor";
+
   return (
     <div className="table-wrap">
       <table className="leaderboard-table">
@@ -695,12 +805,13 @@ function LeaderboardTable({ rows, selectedKey, isMultiSeason, onSelect }) {
           <tr>
             <th>Rank</th>
             <th>{isMultiSeason ? "Seasons" : "Season"}</th>
-            <th>Driver</th>
-            <th>Constructor</th>
+            <th>{isConstructorMode ? "Constructor" : "Driver"}</th>
+            {isConstructorMode ? null : <th>Constructor</th>}
             <th>Score</th>
             <th>Starts</th>
             <th>Wins</th>
             <th>Podiums</th>
+            {isConstructorMode ? <th>Podium Races</th> : null}
             <th>Poles</th>
           </tr>
         </thead>
@@ -715,20 +826,21 @@ function LeaderboardTable({ rows, selectedKey, isMultiSeason, onSelect }) {
               <td className="season-cell">{row.season_label}</td>
               <td>
                 <button
-                  className="driver-pick"
+                  className="entity-pick"
                   type="button"
                   onClick={() => onSelect(row)}
                 >
-                  {row.driver_name}
+                  {row.entity_name}
                 </button>
               </td>
-              <td>{row.constructor_names}</td>
+              {isConstructorMode ? null : <td>{row.constructor_names}</td>}
               <td className="score-cell">{formatNumber(row.computed_score, 1)}</td>
               <td>
                 {row.entries}/{row.scheduled_races}
               </td>
               <td>{row.wins}</td>
               <td>{row.podiums}</td>
+              {isConstructorMode ? <td>{row.podiumed_races}</td> : null}
               <td>{row.active_poles}</td>
             </tr>
           ))}
@@ -738,11 +850,15 @@ function LeaderboardTable({ rows, selectedKey, isMultiSeason, onSelect }) {
   );
 }
 
-function SeasonDetail({ row, raceRows, model }) {
+function SeasonDetail({ row, raceRows, model, mode }) {
+  const isConstructorMode = mode === "constructor";
+
   if (!row) {
     return (
       <aside className="detail-panel">
-        <p className="eyebrow">Season trace</p>
+        <p className="eyebrow">
+          {isConstructorMode ? "Constructor trace" : "Season trace"}
+        </p>
         <h2>No matching seasons</h2>
       </aside>
     );
@@ -755,7 +871,11 @@ function SeasonDetail({ row, raceRows, model }) {
       ? Number(row.avg_grid_harmonic_loss)
       : Number(row.avg_qualifying_harmonic_loss);
   const qualifyingPenalty = Number(model.qualifyingWeight) * qualifyingLoss;
-  const traceLabel = row.is_peak ? "Peak trace" : "Season trace";
+  const traceLabel = row.is_peak
+    ? "Peak trace"
+    : isConstructorMode
+      ? "Constructor trace"
+      : "Season trace";
 
   return (
     <aside className="detail-panel">
@@ -763,9 +883,9 @@ function SeasonDetail({ row, raceRows, model }) {
         <div>
           <p className="eyebrow">{traceLabel}</p>
           <h2>
-            {row.driver_name} <span>{row.season_label}</span>
+            {row.entity_name} <span>{row.season_label}</span>
           </h2>
-          <p>{row.constructor_names}</p>
+          <p>{isConstructorMode ? row.constructor_id : row.constructor_names}</p>
         </div>
         <div className="score-badge">
           <Trophy size={18} aria-hidden="true" />
@@ -790,6 +910,18 @@ function SeasonDetail({ row, raceRows, model }) {
           <span>Points</span>
           <strong>{formatNumber(row.points, 1)}</strong>
         </div>
+        {isConstructorMode ? (
+          <>
+            <div>
+              <span>Car starts</span>
+              <strong>{formatNumber(row.car_entries)}</strong>
+            </div>
+            <div>
+              <span>Podium races</span>
+              <strong>{formatNumber(row.podiumed_races)}</strong>
+            </div>
+          </>
+        ) : null}
       </div>
 
       <div className="race-list">
@@ -803,7 +935,11 @@ function SeasonDetail({ row, raceRows, model }) {
               {showYearDivider ? (
                 <div className="race-year-divider">{race.year}</div>
               ) : null}
-              <div className="race-row">
+              <div
+                className={`race-row ${
+                  isConstructorMode ? "constructor-race-row" : ""
+                }`}
+              >
                 <div className="race-round">
                   <Flag size={14} aria-hidden="true" />
                   <span>{race.round}</span>
@@ -812,12 +948,56 @@ function SeasonDetail({ row, raceRows, model }) {
                   <strong>{race.grand_prix_name}</strong>
                   <span>{race.circuit_name || race.official_name}</span>
                 </div>
-                <div className="race-result">
-                  <span>P{race.position_text || race.position_display_order}</span>
-                  <span>Q{race.qualification_position_text || "-"}</span>
-                  <span>G{race.grid_position_text || "-"}</span>
-                  <strong>{formatNumber(race.points, 1)}</strong>
-                </div>
+                {isConstructorMode ? (
+                  <div className="race-result constructor-race-result">
+                    <span>
+                      {placementLabel(
+                        "P",
+                        race.best_finish_position,
+                        race.best_finish_text,
+                        race.best_finish_driver_abbreviations,
+                      )}
+                    </span>
+                    <span>
+                      {placementLabel(
+                        "Q",
+                        race.best_qualifying_position,
+                        race.best_qualifying_text,
+                        race.best_qualifying_driver_abbreviations,
+                      )}
+                    </span>
+                    <span>
+                      {placementLabel(
+                        "G",
+                        race.best_grid_position,
+                        race.best_grid_text,
+                        race.best_grid_driver_abbreviations,
+                      )}
+                    </span>
+                    <strong>{formatNumber(race.points, 1)}</strong>
+                  </div>
+                ) : (
+                  <div className="race-result">
+                    <span>
+                      {placementLabel(
+                        "P",
+                        race.position_display_order,
+                        race.position_text,
+                      )}
+                    </span>
+                    <span>
+                      {placementLabel(
+                        "Q",
+                        null,
+                        race.qualification_position_text || "-",
+                      )}
+                    </span>
+                    <span>
+                      {placementLabel("G", null, race.grid_position_text || "-")}
+                    </span>
+                    <strong>{formatNumber(race.points, 1)}</strong>
+                  </div>
+                )}
               </div>
             </Fragment>
           );

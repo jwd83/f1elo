@@ -62,8 +62,9 @@ site/public/f1elo.sqlite
 ## Site Explorer
 
 The `site/` directory contains a Vite/React frontend that loads the bundled
-SQLite database with `sql.js`. It opens on a driver-season dominance leaderboard,
-with visible controls for the current scoring model:
+SQLite database with `sql.js`. It opens on a driver-season dominance leaderboard
+and includes a Driver/Constructor toggle, with visible controls for the current
+scoring model:
 
 - `base_rating`
 - `finish_weight`
@@ -80,6 +81,11 @@ completed seasons only
 
 Rows can be searched, re-ranked live in the browser, and opened for a compact
 race-by-race drilldown.
+
+Constructor mode ranks constructor-seasons by each constructor's peak car result
+per race. Finish, qualifying, and grid peaks are selected independently, shared
+cars are collapsed to one physical car result, points use the full constructor
+race haul, and the drilldown shows which driver supplied each peak value.
 
 ## Rerun
 
