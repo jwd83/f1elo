@@ -27,6 +27,36 @@ RATING_OUTPUTS = [
     "driver_season_top_qualified.csv",
     "driver_season_last_3_completed.csv",
 ]
+APP_TABLES = [
+    ("app_leaderboard_driver_seasons", "SELECT * FROM leaderboard_driver_seasons"),
+    ("app_leaderboard_constructor_seasons", "SELECT * FROM leaderboard_constructor_seasons"),
+    (
+        "app_constructor_season_race_results",
+        """
+        SELECT
+          includes_legacy_indy500,
+          is_legacy_indy500,
+          year,
+          round,
+          race_id,
+          grand_prix_name,
+          official_name,
+          constructor_id,
+          circuit_name,
+          best_finish_position,
+          best_finish_text,
+          best_finish_driver_abbreviations,
+          best_qualifying_position,
+          best_qualifying_text,
+          best_qualifying_driver_abbreviations,
+          best_grid_position,
+          best_grid_text,
+          best_grid_driver_abbreviations,
+          points
+        FROM constructor_season_race_results
+        """,
+    ),
+]
 BOOL_COLUMNS = {
     "constructors_championship_decider",
     "driver_of_the_day",
@@ -1139,6 +1169,55 @@ def create_views(connection: sqlite3.Connection) -> None:
     )
 
 
+def materialize_app_tables(connection: sqlite3.Connection) -> dict[str, int]:
+    app_counts = {}
+    for table_name, source_sql in APP_TABLES:
+        connection.execute(f"DROP TABLE IF EXISTS {quote_identifier(table_name)}")
+        connection.execute(f"CREATE TABLE {quote_identifier(table_name)} AS {source_sql}")
+        app_counts[table_name] = connection.execute(
+            f"SELECT COUNT(*) FROM {quote_identifier(table_name)}"
+        ).fetchone()[0]
+
+    connection.executescript(
+        """
+        CREATE INDEX idx_app_leaderboard_driver_scope
+          ON app_leaderboard_driver_seasons(
+            includes_legacy_indy500,
+            is_completed_season,
+            race_share,
+            entries
+          );
+        CREATE INDEX idx_app_leaderboard_driver_entity
+          ON app_leaderboard_driver_seasons(
+            driver_id,
+            includes_legacy_indy500,
+            year
+          );
+        CREATE INDEX idx_app_leaderboard_constructor_scope
+          ON app_leaderboard_constructor_seasons(
+            includes_legacy_indy500,
+            is_completed_season,
+            race_share,
+            entries
+          );
+        CREATE INDEX idx_app_leaderboard_constructor_entity
+          ON app_leaderboard_constructor_seasons(
+            constructor_id,
+            includes_legacy_indy500,
+            year
+          );
+        CREATE INDEX idx_app_constructor_race_lookup
+          ON app_constructor_season_race_results(
+            constructor_id,
+            includes_legacy_indy500,
+            year,
+            round
+          );
+        """
+    )
+    return app_counts
+
+
 def import_rating_metadata(connection: sqlite3.Connection, output_dir: Path) -> None:
     metadata_path = output_dir / "rating_run_metadata.json"
     if not metadata_path.exists():
@@ -1189,14 +1268,17 @@ def build_database(args: argparse.Namespace) -> None:
 
         create_indexes(connection)
         create_views(connection)
+        app_counts = materialize_app_tables(connection)
         import_rating_metadata(connection, output_dir)
         insert_metadata(connection, "generated_at", datetime.now(timezone.utc).isoformat())
         insert_metadata(connection, "f1db_snapshot", input_dir.name)
         insert_metadata(connection, "default_include_legacy_indy500", args.include_legacy_indy500)
         insert_metadata(connection, "raw_table_count", len(raw_counts))
         insert_metadata(connection, "rating_table_count", len(rating_counts))
+        insert_metadata(connection, "app_table_count", len(app_counts))
         insert_metadata(connection, "raw_row_counts", raw_counts)
         insert_metadata(connection, "rating_row_counts", rating_counts)
+        insert_metadata(connection, "app_row_counts", app_counts)
 
         connection.execute("PRAGMA optimize")
         connection.commit()

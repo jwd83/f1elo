@@ -1,9 +1,10 @@
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useDeferredValue, useEffect, useMemo, useState } from "react";
 import {
   Activity,
   Database,
   Flag,
   Gauge,
+  LoaderCircle,
   RotateCcw,
   Search,
   Trophy,
@@ -350,9 +351,15 @@ function App() {
   const [metadata, setMetadata] = useState({});
   const [model, setModel] = useState(DEFAULT_MODEL);
   const [search, setSearch] = useState("");
+  const [showComputeIndicator, setShowComputeIndicator] = useState(false);
   const [selectedKey, setSelectedKey] = useState("");
   const [selectedEntityId, setSelectedEntityId] = useState("");
   const [raceRows, setRaceRows] = useState([]);
+  const scoringModel = useDeferredValue(model);
+  const scoringSearch = useDeferredValue(search);
+  const hasDeferredScoreWork =
+    model !== scoringModel || search !== scoringSearch;
+  const isComputingScores = showComputeIndicator || hasDeferredScoreWork;
 
   useEffect(() => {
     let cancelled = false;
@@ -362,11 +369,11 @@ function App() {
         const loadedDb = await loadDatabase();
         const leaderboard = queryRows(
           loadedDb,
-          "SELECT * FROM leaderboard_driver_seasons",
+          "SELECT * FROM app_leaderboard_driver_seasons",
         );
         const constructorLeaderboard = queryRows(
           loadedDb,
-          "SELECT * FROM leaderboard_constructor_seasons",
+          "SELECT * FROM app_leaderboard_constructor_seasons",
         );
         const constructorRows = queryRows(
           loadedDb,
@@ -402,16 +409,25 @@ function App() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!showComputeIndicator || hasDeferredScoreWork) {
+      return undefined;
+    }
+
+    const timeout = setTimeout(() => setShowComputeIndicator(false), 180);
+    return () => clearTimeout(timeout);
+  }, [hasDeferredScoreWork, showComputeIndicator]);
+
   const peakSize = Math.max(
     1,
-    Math.min(MULTI_SEASON_PEAK_MAX, toNumber(model.multiSeasonPeak)),
+    Math.min(MULTI_SEASON_PEAK_MAX, toNumber(scoringModel.multiSeasonPeak)),
   );
   const isMultiSeason = peakSize >= 2;
-  const isConstructorMode = model.mode === "constructor";
+  const isConstructorMode = scoringModel.mode === "constructor";
   const activeSeasonRows = isConstructorMode
     ? constructorSeasonRows
     : driverSeasonRows;
-  const activeDatasetFlag = model.includeLegacyIndy500 ? 1 : 0;
+  const activeDatasetFlag = scoringModel.includeLegacyIndy500 ? 1 : 0;
   const scopedSeasonRows = useMemo(
     () =>
       activeSeasonRows.filter(
@@ -421,16 +437,24 @@ function App() {
   );
 
   const scoredRows = useMemo(() => {
-    const normalizedSearch = search.trim().toLowerCase();
+    const normalizedSearch = scoringSearch.trim().toLowerCase();
     const eligibleSeasonRows = scopedSeasonRows
-      .map((row) => normalizeSeasonRow(row, model.mode, constructors, model))
-      .filter((row) => model.includeIncomplete || row.is_completed_season === 1)
-      .filter((row) => toNumber(row.race_share) >= toNumber(model.minRaceShare))
-      .filter((row) => toNumber(row.entries) >= toNumber(model.minEntries))
+      .map((row) =>
+        normalizeSeasonRow(row, scoringModel.mode, constructors, scoringModel),
+      )
+      .filter(
+        (row) =>
+          scoringModel.includeIncomplete || row.is_completed_season === 1,
+      )
+      .filter(
+        (row) =>
+          toNumber(row.race_share) >= toNumber(scoringModel.minRaceShare),
+      )
+      .filter((row) => toNumber(row.entries) >= toNumber(scoringModel.minEntries))
       .filter((row) => toNumber(row.entries) > 0);
 
     const rows = isMultiSeason
-      ? buildPeakRows(eligibleSeasonRows, model, constructors, peakSize)
+      ? buildPeakRows(eligibleSeasonRows, scoringModel, constructors, peakSize)
           .filter((row) => rowMatchesSearch(row, normalizedSearch))
           .sort(comparePeakRows)
       : eligibleSeasonRows
@@ -438,7 +462,14 @@ function App() {
           .sort(compareSeasonRows);
 
     return rows.map((row, index) => ({ ...row, computed_rank: index + 1 }));
-  }, [constructors, isMultiSeason, model, peakSize, scopedSeasonRows, search]);
+  }, [
+    constructors,
+    isMultiSeason,
+    peakSize,
+    scopedSeasonRows,
+    scoringModel,
+    scoringSearch,
+  ]);
 
   const tableRows = scoredRows.slice(0, 250);
   const selectedRow = useMemo(() => {
@@ -482,7 +513,7 @@ function App() {
     const placeholders = selectedYears.map(() => "?").join(", ");
     const selectedScope = toNumber(selectedRow.includes_legacy_indy500);
     const raceView = isConstructorMode
-      ? "constructor_season_race_results"
+      ? "app_constructor_season_race_results"
       : "driver_season_race_results";
     const idField = isConstructorMode ? "constructor_id" : "driver_id";
     const rows = queryRows(
@@ -517,6 +548,16 @@ function App() {
     setSelectedEntityId(row.entity_id);
   }
 
+  function updateModel(nextModel) {
+    setShowComputeIndicator(true);
+    setModel(nextModel);
+  }
+
+  function updateSearch(value) {
+    setShowComputeIndicator(true);
+    setSearch(value);
+  }
+
   return (
     <main className="app-shell">
       <header className="app-header">
@@ -526,7 +567,7 @@ function App() {
           </div>
           <div>
             <p className="eyebrow">
-              {isConstructorMode
+              {model.mode === "constructor"
                 ? "Constructor peak dominance"
                 : "Driver-season dominance"}
             </p>
@@ -549,7 +590,7 @@ function App() {
       ) : (
         <>
           <section className="top-grid">
-            <ModelControls model={model} onChange={setModel} />
+            <ModelControls model={model} onChange={updateModel} />
             <TimingSnapshot
               leader={leader}
               rows={scoredRows}
@@ -564,31 +605,43 @@ function App() {
               <div className="panel-toolbar">
                 <div>
                   <p className="eyebrow">Leaderboard</p>
-                  <h2>{leaderboardTitle(model.mode, isMultiSeason)}</h2>
+                  <h2>{leaderboardTitle(scoringModel.mode, isMultiSeason)}</h2>
                 </div>
-                <div className="search-box">
-                  <Search size={16} aria-hidden="true" />
-                  <input
-                    aria-label="Search leaderboard"
-                    value={search}
-                    onChange={(event) => setSearch(event.target.value)}
-                    placeholder={
-                      isConstructorMode
-                        ? "Constructor or year"
-                        : "Driver, year, constructor"
-                    }
-                  />
-                  {search ? (
-                    <button
-                      className="clear-search"
-                      type="button"
-                      onClick={() => setSearch("")}
-                      title="Clear search"
-                      aria-label="Clear search"
+                <div className="toolbar-actions">
+                  {isComputingScores ? (
+                    <div
+                      className="score-compute-indicator"
+                      role="status"
+                      aria-live="polite"
                     >
-                      <X size={14} aria-hidden="true" />
-                    </button>
+                      <LoaderCircle size={15} aria-hidden="true" />
+                      <span>Computing scores</span>
+                    </div>
                   ) : null}
+                  <div className="search-box">
+                    <Search size={16} aria-hidden="true" />
+                    <input
+                      aria-label="Search leaderboard"
+                      value={search}
+                      onChange={(event) => updateSearch(event.target.value)}
+                      placeholder={
+                        model.mode === "constructor"
+                          ? "Constructor or year"
+                          : "Driver, year, constructor"
+                      }
+                    />
+                    {search ? (
+                      <button
+                        className="clear-search"
+                        type="button"
+                        onClick={() => updateSearch("")}
+                        title="Clear search"
+                        aria-label="Clear search"
+                      >
+                        <X size={14} aria-hidden="true" />
+                      </button>
+                    ) : null}
+                  </div>
                 </div>
               </div>
 
@@ -596,7 +649,7 @@ function App() {
                 rows={tableRows}
                 selectedKey={selectedRow?.key}
                 isMultiSeason={isMultiSeason}
-                mode={model.mode}
+                mode={scoringModel.mode}
                 constructors={constructors}
                 onSelect={selectRow}
               />
@@ -604,7 +657,7 @@ function App() {
               <div className="table-footer">
                 <span>
                   {formatNumber(scoredRows.length)} eligible{" "}
-                  {eligibleLabel(model.mode, isMultiSeason)}
+                  {eligibleLabel(scoringModel.mode, isMultiSeason)}
                 </span>
                 <span>showing {formatNumber(tableRows.length)}</span>
               </div>
@@ -613,8 +666,8 @@ function App() {
             <SeasonDetail
               row={selectedRow}
               raceRows={raceRows}
-              model={model}
-              mode={model.mode}
+              model={scoringModel}
+              mode={scoringModel.mode}
               constructors={constructors}
             />
           </section>

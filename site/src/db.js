@@ -11,9 +11,7 @@ export async function loadDatabase() {
   }
 
   const SQL = await sqlPromise;
-  const response = await fetch(`${import.meta.env.BASE_URL}f1elo.sqlite`, {
-    cache: "no-store",
-  });
+  const response = await fetch(`${import.meta.env.BASE_URL}f1elo.sqlite`);
 
   if (!response.ok) {
     throw new Error(`Could not load f1elo.sqlite (${response.status})`);

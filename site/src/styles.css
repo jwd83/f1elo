@@ -530,6 +530,41 @@ input[type="range"] {
   margin-bottom: 12px;
 }
 
+.toolbar-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: 0;
+  gap: 10px;
+}
+
+.score-compute-indicator {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 6px;
+  border: 1px solid color-mix(in srgb, var(--yellow) 55%, var(--line));
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: color-mix(in srgb, var(--yellow) 12%, var(--track-2));
+  color: var(--yellow);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.7rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.score-compute-indicator svg {
+  animation: score-spin 0.75s linear infinite;
+}
+
+@keyframes score-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .search-box {
   display: flex;
   align-items: center;
@@ -917,6 +952,15 @@ input[type="range"] {
 
   .search-box {
     width: 100%;
+  }
+
+  .toolbar-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .score-compute-indicator {
+    justify-content: center;
   }
 
   .race-row {
